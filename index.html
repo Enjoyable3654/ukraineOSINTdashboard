@@ -44,7 +44,7 @@ h2{font:600 22px Georgia,serif;margin:0 0 2px}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 .sum{margin-top:12px}
 </style></head><body>
-<div class="note"><b>Sample data.</b> Every event, claim and post here is generated placeholder content to show the layout, not real reporting.</div>
+<div class="note"><b>Sample data.</b> The events, claims and posts here are generated placeholders, not real reporting. The occupation layer is real DeepStateMap data once the daily job has produced it.</div>
 <div class="wrap">
 <aside>
  <div class="card"><h1>Daily archive</h1><p class="mut" style="margin:2px 0 10px">Pick a day to reload the whole dashboard as it was archived.</p><div id="cal"></div></div>
@@ -54,7 +54,7 @@ h2{font:600 22px Georgia,serif;margin:0 0 2px}
  <h2 id="date"></h2><div class="mut" id="meta"></div>
  <div class="tabs" role="tablist"><button data-t="map">Map</button><button data-t="feat">Features</button><button data-t="post">Posts</button></div>
  <div id="fbar"></div>
- <div id="mapPane"><div class="bar"><label class="btn">Add GeoTIFF<input type="file" id="gt" accept=".tif,.tiff,.geotiff" multiple hidden></label><span class="mut" id="gs">Files are read in your browser and never uploaded. You can also drop them on the map.</span></div><div id="lyrs"></div><p id="tn" class="note" hidden></p><div id="map"></div><div id="det"></div></div>
+ <div id="mapPane"><div class="bar"><label class="btn">Add GeoTIFF<input type="file" id="gt" accept=".tif,.tiff,.geotiff" multiple hidden></label><span class="mut" id="gs">Files are read in your browser and never uploaded. You can also drop them on the map.</span></div><div id="lyrs"></div><div class="bar"><span class="mut" id="os"></span><span id="oc"></span></div><p id="tn" class="note" hidden></p><div id="map"></div><div id="det"></div></div>
  <div id="view"></div>
 </main></div>
 <p class="mut" style="text-align:center;margin:0 0 16px">Map data from OpenStreetMap. <a href="https://www.openstreetmap.org/fixthemap">Report a map issue</a></p>
@@ -110,11 +110,12 @@ function render(){
  const s=ev.find(e=>e.id==fid);
  $("#det").innerHTML=s?dt(s):`<p class="mut">Select a marker to see who reported it and how it was verified.</p>`;
  mk.clearLayers();
- ev.forEach(e=>L.circleMarker([e.y,e.x],{radius:e.id==fid?11:7,color:e.id==fid?"#000":"#fff",weight:2,fillColor:CAT[e.cat],fillOpacity:.85}).bindTooltip(e.place+": "+e.cat).on("click",()=>{fid=e.id;render()}).addTo(mk));
+ ev.forEach(e=>L.circleMarker([e.y,e.x],{pane:"markerPane",radius:e.id==fid?11:7,color:e.id==fid?"#000":"#fff",weight:2,fillColor:CAT[e.cat],fillOpacity:.85}).bindTooltip(e.place+": "+e.cat).on("click",()=>{fid=e.id;render()}).addTo(mk));
  if(tab=="map")setTimeout(()=>map.invalidateSize(),0);
  let h="";
  if(tab=="feat")h=ev.length?ev.map(e=>`<button class="row${e.id==fid?" on":""}" data-f="${e.id}" data-go="1"><b><span class="dot" style="background:${CAT[e.cat]}"></span>${e.cat} · ${e.place}</b> <span class="mut">${e.t}</span> ${badge(e)}<ul class="cl">${e.cl.map(c=>`<li>${c}</li>`).join("")}</ul></button>`).join(""):`<p class="mut">No features match this filter.</p>`;
  else if(tab=="post")h=a.po.map(p=>`<div class="row"><span class="mut">${p.src} · ${p.t}</span><div><b>${p.title}</b></div><span class="b">${p.place}</span></div>`).join("");
+ if(occFor!==sel){occFor=sel;loadOcc()}
  $("#view").innerHTML=h}
 document.addEventListener("click",e=>{
  const b=e.target.closest("[data-m],[data-d],[data-t],[data-f]");if(!b)return;
@@ -123,8 +124,29 @@ document.addEventListener("click",e=>{
  else if(b.dataset.t)tab=b.dataset.t;
  else{fid=b.dataset.f;if(b.dataset.go)tab="map"}
  render();if(b.dataset.go&&fid){const s=A[sel].ev.find(e=>e.id==fid);if(s)map.setView([s.y,s.x],8)}});
-document.addEventListener("change",e=>{if(e.target.id=="cf"){conf=e.target.checked;render()}});
+document.addEventListener("change",e=>{if(e.target.id=="cf"){conf=e.target.checked;render()}if(e.target.dataset.oc){occOn[e.target.dataset.oc]=e.target.checked;drawOcc()}});
 
+/* Occupation polygons from data/<date>/occupation.geojson, built by the daily job */
+map.createPane("occ").style.zIndex=450;
+const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let OCC=null,CATS={},occOn={},occFor=null;
+async function loadOcc(){
+ const day=sel;OCC=null;
+ try{
+  if(!Object.keys(CATS).length)CATS=(await(await fetch("data/categories.json")).json()).categories;
+  const r=await fetch(`data/${day}/occupation.geojson`);if(!r.ok)throw 0;
+  const j=await r.json();if(day!==sel)return;OCC=j
+ }catch(e){}
+ drawOcc()}
+function drawOcc(){
+ ol.clearLayers();const st=$("#os"),oc=$("#oc");
+ if(!OCC){st.textContent="No occupation data for this day yet. It appears after the daily data job has run.";oc.innerHTML="";return}
+ const cs=[...new Set(OCC.features.map(f=>f.properties.category))],ct=c=>CATS[c]||{};
+ st.innerHTML='Occupation layer: <a href="https://deepstatemap.live/en" target="_blank" rel="noopener">DeepStateMap</a> ';
+ oc.innerHTML=cs.map(c=>`<label><input type="checkbox" data-oc="${esc(c)}" ${occOn[c]===false?"":"checked"}><span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}</label> `).join("");
+ L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.category]!==false,
+  style:f=>{const k=ct(f.properties.category).color||"#444";return{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
+  onEachFeature:(f,l)=>{const p=f.properties;l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)}<br>Original types: ${esc(p.source_labels.join("; "))}<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²<br>Fetched: ${esc(p.fetched_at_utc)}`)}}).addTo(ol)}
 /* GeoTIFF upload: parsed and reprojected in the browser, nothing leaves the device */
 const RL=[];
 function crs(c){
