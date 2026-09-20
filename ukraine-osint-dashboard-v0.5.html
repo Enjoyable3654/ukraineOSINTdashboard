@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Ukraine OSINT Dashboard (mockup)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/proj4@2.9.2/dist/proj4.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+<style>
+:root{--bg:#eef1f4;--fg:#1b2430;--mut:#5c6673;--card:#fff;--bd:#d3d9e0;--acc:#1f6f8b;--acct:#fff;--sea:#dfe8ef;--land:#f8f9f6;--warn:#fff3cd;--warnt:#5c4400;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12171d;--fg:#e6eaef;--mut:#95a0ad;--card:#1a222b;--bd:#2c3763;--bd:#2d3a48;--acc:#5fb3d0;--acct:#0b1a22;--sea:#182530;--land:#212c37;--warn:#3a3210;--warnt:#f0dc8a}}
+:root[data-theme="dark"]{--bg:#12171d;--fg:#e6eaef;--mut:#95a0ad;--card:#1a222b;--bd:#2d3a48;--acc:#5fb3d0;--acct:#0b1a22;--sea:#182530;--land:#212c37;--warn:#3a3210;--warnt:#f0dc8a}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.note{background:var(--warn);color:var(--warnt);padding:6px 14px;font-size:13px}
+.wrap{display:grid;grid-template-columns:290px 1fr;gap:16px;padding:16px;max-width:1150px;margin:0 auto}
+@media(max-width:760px){.wrap{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px}
+h1{font:600 20px Georgia,serif;margin:0}
+h2{font:600 22px Georgia,serif;margin:0 0 2px}
+.mut{color:var(--mut);font-size:13px}
+.ch{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.ch button{border:1px solid var(--bd);background:none;border-radius:6px;width:30px;height:28px}
+.cg{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center}
+.cg i{font-style:normal;font-size:12px;color:var(--mut)}
+.d{position:relative;border:1px solid transparent;background:none;border-radius:6px;height:38px;padding:0}
+.d:disabled{color:var(--mut);opacity:.45;cursor:default}
+.d.has{background:var(--sea);border-color:var(--bd)}
+.d.on{background:var(--acc);color:var(--acct);border-color:var(--acc)}
+.d u{position:absolute;right:3px;bottom:1px;font-size:10px;text-decoration:none;opacity:.8}
+.tabs{display:flex;gap:4px;margin:12px 0}
+.tabs button{border:1px solid var(--bd);background:var(--card);padding:6px 14px;border-radius:6px}
+.tabs button.on{background:var(--acc);color:var(--acct);border-color:var(--acc)}
+.bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+#map{height:480px;border-radius:6px;border:1px solid var(--bd)}.ly{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0}.ly button,.btn{border:1px solid var(--bd);background:var(--card);border-radius:6px;padding:3px 10px}.btn{cursor:pointer;display:inline-block}
+.row{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:9px 12px;margin-bottom:8px}
+.row.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.b{display:inline-block;font-size:12px;padding:0 7px;border:1px solid var(--bd);border-radius:10px;margin-right:4px}
+.cl{margin:6px 0 0;padding-left:16px;font-size:13px;color:var(--mut)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.sum{margin-top:12px}
+</style></head><body>
+<div class="note"><b>Sample data.</b> Every event, claim and post here is generated placeholder content to show the layout, not real reporting.</div>
+<div class="wrap">
+<aside>
+ <div class="card"><h1>Daily archive</h1><p class="mut" style="margin:2px 0 10px">Pick a day to reload the whole dashboard as it was archived.</p><div id="cal"></div></div>
+ <div class="card sum"><b>Day summary</b><p id="sum" class="mut" style="margin:6px 0 0"></p></div>
+</aside>
+<main>
+ <h2 id="date"></h2><div class="mut" id="meta"></div>
+ <div class="tabs" role="tablist"><button data-t="map">Map</button><button data-t="feat">Features</button><button data-t="post">Posts</button></div>
+ <div id="fbar"></div>
+ <div id="mapPane"><div class="bar"><label class="btn">Add GeoTIFF<input type="file" id="gt" accept=".tif,.tiff,.geotiff" multiple hidden></label><span class="mut" id="gs">Files are read in your browser and never uploaded. You can also drop them on the map.</span></div><div id="lyrs"></div><p id="tn" class="note" hidden></p><div id="map"></div><div id="det"></div></div>
+ <div id="view"></div>
+</main></div>
+<p class="mut" style="text-align:center;margin:0 0 16px">Map data from OpenStreetMap. <a href="https://www.openstreetmap.org/fixthemap">Report a map issue</a></p>
+<script>
+const $=s=>document.querySelector(s);
+const PL=[["Kyiv",30.52,50.45],["Kharkiv",36.23,49.99],["Odesa",30.72,46.48],["Dnipro",35.05,48.46],["Zaporizhzhia",35.14,47.84],["Lviv",24.03,49.84],["Donetsk",37.8,48.0],["Kherson",32.62,46.64],["Sumy",34.8,50.91],["Mykolaiv",31.99,46.97],["Pokrovsk",37.18,48.28],["Kupiansk",37.62,49.71]];
+const CAT={"Air alert":"#d9822b","Strike claim":"#c0392b","Clash":"#7d5fc4","Thermal detection":"#a88a00"};
+const CK=Object.keys(CAT),SRC=["Sample Analyst Group","Sample Wire","Sample Fact-check","Sample Regional Outlet"],ST=["confirmed","claimed","unverified"];
+const UA=[[22.15,48.4],[22.6,49.1],[23.5,50.4],[24.1,50.8],[23.6,51.5],[25.8,51.9],[27.5,51.6],[28.7,52.1],[30.5,51.4],[31.8,52.1],[33.5,52.35],[34.4,51.7],[35.6,51.0],[36.6,50.2],[38.0,49.9],[40.1,49.6],[39.7,48.8],[39.8,47.9],[38.2,47.1],[36.0,46.65],[35.0,46.3],[34.7,45.8],[33.6,46.1],[32.5,46.1],[31.75,46.3],[30.7,46.5],[29.6,45.4],[28.2,45.45],[28.6,46.4],[28.2,47.4],[26.6,48.3],[24.6,47.9],[22.9,47.95]];
+const CR=[[32.5,45.4],[33.6,46.0],[35.0,45.7],[36.5,45.4],[35.0,44.8],[33.6,44.4]];
+const X=x=>((x-22)*31.5).toFixed(0),Y=y=>((53-y)*47).toFixed(0);
+const poly=p=>p.map(q=>X(q[0])+","+Y(q[1])).join(" ");
+const key=d=>new Date(d).toISOString().slice(0,10);
+const A={};
+for(let d=Date.UTC(2026,7,24);d<=Date.UTC(2026,8,20);d+=864e5){
+ const k=key(d);let s=d/864e5|0;const r=()=>(s=(s*1664525+1013904223)>>>0)/4294967296;
+ const ev=[...Array(4+(r()*5|0))].map((_,i)=>{
+  const p=PL[r()*PL.length|0],c=CK[r()*4|0],st=ST[r()*3|0],cl=[];
+  if(r()<.7)cl.push(["Ukraine","official"]);if(r()<.6)cl.push(["Russia","official"]);
+  if(st=="confirmed")cl.push(["Independent","geolocated"]);if(!cl.length)cl.push(["Ukraine","official"]);
+  return{id:k+i,place:p[0],x:p[1],y:p[2],cat:c,st,
+   t:String(r()*24|0).padStart(2,"0")+":"+String(r()*60|0).padStart(2,"0"),
+   cl:cl.map(a=>`${a[0]} (${a[1]}): sample statement about ${c.toLowerCase()} near ${p[0]}.`)}
+ }).sort((a,b)=>a.t<b.t?-1:1);
+ const po=[...Array(3+(r()*3|0))].map((_,i)=>({src:SRC[r()*4|0],t:String(r()*24|0).padStart(2,"0")+":00",place:PL[r()*PL.length|0][0],title:"Sample post "+(i+1)+": overnight developments summary"}));
+ A[k]={ev,po}}
+const map=L.map("map").setView([48.6,31.2],6),mk=L.layerGroup().addTo(map),rl=L.layerGroup().addTo(map);
+/* Basemap config: change url/attr here to switch tile provider. */
+const BASE={url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png",attr:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'};
+const tn=$("#tn");
+if(location.protocol=="file:"){tn.hidden=false;tn.textContent="This page was opened straight from your computer (file://), so the browser sends no Referer (a note saying which website is asking) and OpenStreetMap blocks the map tiles. To see the map, host the page (for example on GitHub Pages) or run a local server: python3 -m http.server 8000, then open http://localhost:8000/ in your browser."}
+else{const tl=L.tileLayer(BASE.url,{maxZoom:19,attribution:BASE.attr,referrerPolicy:"strict-origin-when-cross-origin"}).addTo(map);
+ let te=0;tl.on("tileerror",()=>{if(++te==3){tn.hidden=false;tn.textContent="Map tiles are not loading. Read the message written on a gray tile. If it mentions the Referer, a browser privacy setting, extension, or antivirus is probably removing it. See https://wiki.openstreetmap.org/wiki/Blocked_tiles"}})}
+let sel="2026-09-20",view=[2026,8],tab="map",fid=null,conf=false;
+function cal(){
+ const[y,m]=view,f=new Date(Date.UTC(y,m,1)),off=(f.getUTCDay()+6)%7,n=new Date(Date.UTC(y,m+1,0)).getUTCDate();
+ let h=`<div class="ch"><button data-m="-1" aria-label="Previous month">‹</button><b>${f.toLocaleString("en",{month:"long",year:"numeric",timeZone:"UTC"})}</b><button data-m="1" aria-label="Next month">›</button></div><div class="cg">`+"MTWTFSS".split("").map(d=>`<i>${d}</i>`).join("")+"<span></span>".repeat(off);
+ for(let d=1;d<=n;d++){const k=key(Date.UTC(y,m,d)),a=A[k];
+  h+=`<button class="d${a?" has":""}${k==sel?" on":""}" ${a?`data-d="${k}"`:"disabled"}>${d}${a?`<u>${a.ev.length}</u>`:""}</button>`}
+ $("#cal").innerHTML=h+"</div>"}
+const badge=e=>`<span class="b">${e.st}</span>`;
+const dt=e=>`<div class="card" style="margin-top:8px"><b><span class="dot" style="background:${CAT[e.cat]}"></span>${e.cat} · ${e.place}</b> <span class="mut">${e.t} ${badge(e)}</span><ul class="cl">${e.cl.map(c=>`<li>${c}</li>`).join("")}</ul></div>`;
+function render(){
+ cal();const a=A[sel],ev=a.ev.filter(e=>!conf||e.st=="confirmed");
+ if(fid&&!ev.find(e=>e.id==fid))fid=null;
+ $("#date").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"long",month:"long",day:"numeric",year:"numeric",timeZone:"UTC"});
+ $("#meta").textContent=`Archived snapshot · ${ev.length} features · ${a.po.length} posts`;
+ const cnt={};a.ev.forEach(e=>cnt[e.cat]=(cnt[e.cat]||0)+1);
+ $("#sum").textContent=`${a.ev.length} events archived (${CK.filter(c=>cnt[c]).map(c=>cnt[c]+" "+c.toLowerCase()).join(", ")}). The LLM-written summary of the day, split by who claims what, will appear here.`;
+ document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.t==tab));
+ $("#fbar").innerHTML=`<div class="bar"><label><input type="checkbox" id="cf" ${conf?"checked":""}> Confirmed only</label><span class="mut">${CK.map(c=>`<span class="dot" style="background:${CAT[c]}"></span>${c}`).join("  ")}</span></div>`;
+ $("#mapPane").hidden=tab!="map";
+ const s=ev.find(e=>e.id==fid);
+ $("#det").innerHTML=s?dt(s):`<p class="mut">Select a marker to see who reported it and how it was verified.</p>`;
+ mk.clearLayers();
+ ev.forEach(e=>L.circleMarker([e.y,e.x],{radius:e.id==fid?11:7,color:e.id==fid?"#000":"#fff",weight:2,fillColor:CAT[e.cat],fillOpacity:.85}).bindTooltip(e.place+": "+e.cat).on("click",()=>{fid=e.id;render()}).addTo(mk));
+ if(tab=="map")setTimeout(()=>map.invalidateSize(),0);
+ let h="";
+ if(tab=="feat")h=ev.length?ev.map(e=>`<button class="row${e.id==fid?" on":""}" data-f="${e.id}" data-go="1"><b><span class="dot" style="background:${CAT[e.cat]}"></span>${e.cat} · ${e.place}</b> <span class="mut">${e.t}</span> ${badge(e)}<ul class="cl">${e.cl.map(c=>`<li>${c}</li>`).join("")}</ul></button>`).join(""):`<p class="mut">No features match this filter.</p>`;
+ else if(tab=="post")h=a.po.map(p=>`<div class="row"><span class="mut">${p.src} · ${p.t}</span><div><b>${p.title}</b></div><span class="b">${p.place}</span></div>`).join("");
+ $("#view").innerHTML=h}
+document.addEventListener("click",e=>{
+ const b=e.target.closest("[data-m],[data-d],[data-t],[data-f]");if(!b)return;
+ if(b.dataset.m){const d=new Date(Date.UTC(view[0],view[1]+ +b.dataset.m,1));view=[d.getUTCFullYear(),d.getUTCMonth()]}
+ else if(b.dataset.d){sel=b.dataset.d;fid=null}
+ else if(b.dataset.t)tab=b.dataset.t;
+ else{fid=b.dataset.f;if(b.dataset.go)tab="map"}
+ render();if(b.dataset.go&&fid){const s=A[sel].ev.find(e=>e.id==fid);if(s)map.setView([s.y,s.x],8)}});
+document.addEventListener("change",e=>{if(e.target.id=="cf"){conf=e.target.checked;render()}});
+
+/* GeoTIFF upload: parsed and reprojected in the browser, nothing leaves the device */
+const RL=[];
+function crs(c){
+ if(c==4326)return"EPSG:4326";if(c==3857||c==900913)return"EPSG:3857";
+ if(c>=32601&&c<=32660)return`+proj=utm +zone=${c-32600} +datum=WGS84 +units=m +no_defs`;
+ if(c>=32701&&c<=32760)return`+proj=utm +zone=${c-32700} +south +datum=WGS84 +units=m +no_defs`;
+ if(c>=25828&&c<=25838)return`+proj=utm +zone=${c-25800} +ellps=GRS80 +units=m +no_defs`;
+ return null}
+async function addTiff(file){
+ const st=$("#gs");st.textContent="Reading "+file.name+"...";
+ try{
+  const t=await GeoTIFF.fromBlob(file),im=await t.getImage(),g=im.getGeoKeys(),
+   code=g.ProjectedCSTypeGeoKey&&g.ProjectedCSTypeGeoKey!=32767?g.ProjectedCSTypeGeoKey:g.GeographicTypeGeoKey,def=crs(code);
+  if(!def)throw Error("unsupported coordinate system (EPSG:"+code+"). Reproject it to EPSG:4326, 3857 or UTM first");
+  const W=im.getWidth(),H=im.getHeight(),k=Math.min(1,1400/Math.max(W,H)),w=Math.round(W*k),h=Math.round(H*k),bb=im.getBoundingBox();
+  const ras=await im.readRasters({width:w,height:h}),nd=im.getGDALNoData(),bands=ras.length>=3?[0,1,2]:[0];
+  const lim=bands.map(i=>{const a=ras[i];if(a instanceof Uint8Array)return[0,255];const v=[];
+   for(let j=0;j<a.length;j+=7)if(a[j]&&a[j]!==nd&&a[j]===a[j])v.push(a[j]);v.sort((p,q)=>p-q);return[v[v.length*.02|0]||0,v[v.length*.98|0]||1]});
+  st.textContent="Placing "+file.name+" on the map...";await new Promise(r=>setTimeout(r,30));
+  const to=proj4(def,"EPSG:3857"),cs=[[bb[0],bb[1]],[bb[2],bb[1]],[bb[0],bb[3]],[bb[2],bb[3]]].map(p=>to.forward(p)),
+   xs=cs.map(p=>p[0]),ys=cs.map(p=>p[1]),minx=Math.min(...xs),maxx=Math.max(...xs),miny=Math.min(...ys),maxy=Math.max(...ys),
+   sc=1400/Math.max(maxx-minx,maxy-miny),ow=Math.round((maxx-minx)*sc),oh=Math.round((maxy-miny)*sc),
+   cv=document.createElement("canvas");cv.width=ow;cv.height=oh;
+  const cx=cv.getContext("2d"),img=cx.createImageData(ow,oh),d=img.data,n=bands.length;
+  for(let y=0;y<oh;y++)for(let x=0;x<ow;x++){
+   const p=to.inverse([minx+(x+.5)/sc,maxy-(y+.5)/sc]),u=Math.floor((p[0]-bb[0])/(bb[2]-bb[0])*w),v=Math.floor((bb[3]-p[1])/(bb[3]-bb[1])*h);
+   if(u<0||v<0||u>=w||v>=h)continue;
+   const o=v*w+u,q=(y*ow+x)*4,c=[0,0,0];let z=1,bad=0;
+   for(let i=0;i<3;i++){const j=n>1?i:0,val=ras[bands[j]][o];if(val===nd||val!==val)bad=1;if(val)z=0;c[i]=(val-lim[j][0])/(lim[j][1]-lim[j][0]||1)*255}
+   if(bad||z)continue;d[q]=c[0];d[q+1]=c[1];d[q+2]=c[2];d[q+3]=255}
+  cx.putImageData(img,0,0);
+  const ll=p=>{const a=proj4("EPSG:3857","EPSG:4326",p);return[a[1],a[0]]},bounds=[ll([minx,miny]),ll([maxx,maxy])];
+  RL.push({name:file.name,layer:L.imageOverlay(cv.toDataURL(),bounds,{opacity:.85}).addTo(rl),bounds});
+  map.fitBounds(bounds);lyr();st.textContent="Loaded "+file.name+"."
+ }catch(e){st.textContent="Could not load "+file.name+": "+e.message}}
+function lyr(){$("#lyrs").innerHTML=RL.map((r,i)=>`<div class="ly"><b>${r.name.replace(/[<&>]/g,"")}</b><input type="range" min="0" max="1" step=".05" value="${r.layer.options.opacity}" data-o="${i}" aria-label="Opacity"><button data-z="${i}">Zoom to</button><button data-x="${i}">Remove</button></div>`).join("")}
+const addAll=fs=>[...fs].reduce((p,f)=>p.then(()=>addTiff(f)),Promise.resolve());
+$("#gt").onchange=e=>{addAll(e.target.files);e.target.value=""};
+$("#map").ondragover=e=>e.preventDefault();$("#map").ondrop=e=>{e.preventDefault();addAll(e.dataTransfer.files)};
+$("#lyrs").oninput=e=>{const i=e.target.dataset.o;if(i!=null)RL[i].layer.setOpacity(e.target.value)};
+$("#lyrs").onclick=e=>{const b=e.target.dataset;if(b.z)map.fitBounds(RL[b.z].bounds);if(b.x){rl.removeLayer(RL[b.x].layer);RL.splice(b.x,1);lyr()}};
+render();
+</script></body></html>
