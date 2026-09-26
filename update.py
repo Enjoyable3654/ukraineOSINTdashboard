@@ -35,7 +35,7 @@ USER_AGENT = "ukraine-osint-dashboard/1.0 (+https://github.com/Enjoyable3654/ukr
 CATEGORIES = {   # shared by all sources; the map's checkboxes use these
     "ukraine":   {"label": "Ukraine-controlled / recently liberated", "color": "#2a7de1"},
     "russia":    {"label": "Russian-occupied", "color": "#d64545"},
-    "contested": {"label": "Contested / unknown status", "color": "#e0a800"},
+    "contested": {"label": "Contested / unknown status", "color": "#444444"},
     "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0"},
     "other":     {"label": "Other", "color": "#7f8c8d"},
     "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
