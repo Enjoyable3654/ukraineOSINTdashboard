@@ -212,7 +212,7 @@ def write_json(path, obj):
 
 
 def run_occupation(sid, cfg, args, day, now, data):
-    """A source that returns map polygons: sort into categories, merge, save occupation.geojson."""
+    """A source that returns map polygons: sort into categories, merge, save polygons/occupation.geojson."""
     try:
         payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else fetch(cfg["endpoint"])
     except Exception as e:
@@ -268,10 +268,10 @@ def run_occupation(sid, cfg, args, day, now, data):
 
     save_meta(data, day, sid, {
         "status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "snapshot_time": snap,
-        "endpoint": args.from_file or cfg["endpoint"], "by_category": by_cat,
+        "endpoint": args.from_file or cfg["endpoint"], "files": [f"{sid}/{filename}"], "by_category": by_cat,
         "unmapped_labels": sorted(labels.get("unmapped", [])), "skipped_non_polygon": dict(skipped), "processing": note})
     if args.keep_raw:
-        with gzip.open(final_path.parent / "raw.json.gz", "wt", encoding="utf-8") as fh:
+        with gzip.open(data / day / sid / "raw.json.gz", "wt", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
 
     print(f"[{sid}] saved {final_path}  ({note})")
@@ -284,7 +284,9 @@ def run_occupation(sid, cfg, args, day, now, data):
 
 
 KINDS = {"occupation": run_occupation}   # add new kinds of source here
-KIND_FILENAMES = {"occupation": "polygons.geojson"}   # output filename saved under data/<day>/<source>/
+# Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
+# meta.json lists each source's files, and the dashboard reads them from there.
+KIND_FILENAMES = {"occupation": "polygons/occupation.geojson"}
 
 
 def save_meta(data, day, sid, entry):

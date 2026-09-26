@@ -126,7 +126,7 @@ document.addEventListener("click",e=>{
  render();if(b.dataset.go&&fid){const s=A[sel].ev.find(e=>e.id==fid);if(s)map.setView([s.y,s.x],8)}});
 document.addEventListener("change",e=>{if(e.target.id=="cf"){conf=e.target.checked;render()}if(e.target.dataset.oc){occOn[e.target.dataset.oc]=e.target.checked;drawOcc()}});
 
-/* Occupation polygons from data/<date>/occupation.geojson, built by the daily job */
+/* Occupation polygons from data/<date>/<source>/polygons/occupation.geojson, built by the daily job */
 map.createPane("occ").style.zIndex=450;
 const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 let OCC=null,CATS={},occOn={},occFor=null;
@@ -135,9 +135,10 @@ async function loadOcc(){
  try{
   if(!Object.keys(CATS).length)CATS=(await(await fetch("data/categories.json")).json()).categories;
   const meta=await(await fetch(`data/${day}/meta.json`)).json();
-  const ids=Object.keys(meta.sources||{}).filter(k=>meta.sources[k].status==="ok");
-  const parts=await Promise.all(ids.map(async id=>{
-   try{const r=await fetch(`data/${day}/${id}/polygons.geojson`);if(!r.ok)return[];return(await r.json()).features}catch(e){return[]}
+  /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
+  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/polygons/occupation.geojson"));
+  const parts=await Promise.all(files.map(async f=>{
+   try{const r=await fetch(`data/${day}/${f}`);if(!r.ok)return[];return(await r.json()).features}catch(e){return[]}
   }));
   const feats=parts.flat();
   if(day!==sel)return;
