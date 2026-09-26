@@ -69,7 +69,7 @@ const X=x=>((x-22)*31.5).toFixed(0),Y=y=>((53-y)*47).toFixed(0);
 const poly=p=>p.map(q=>X(q[0])+","+Y(q[1])).join(" ");
 const key=d=>new Date(d).toISOString().slice(0,10);
 const A={};
-for(let d=Date.UTC(2026,7,24);d<=Date.UTC(2026,8,20);d+=864e5){
+for(let d=Date.UTC(2026,7,24);d<=Date.now();d+=864e5){
  const k=key(d);let s=d/864e5|0;const r=()=>(s=(s*1664525+1013904223)>>>0)/4294967296;
  const ev=[...Array(4+(r()*5|0))].map((_,i)=>{
   const p=PL[r()*PL.length|0],c=CK[r()*4|0],st=ST[r()*3|0],cl=[];
@@ -88,7 +88,7 @@ const tn=$("#tn");
 if(location.protocol=="file:"){tn.hidden=false;tn.textContent="This page was opened straight from your computer (file://), so the browser sends no Referer (a note saying which website is asking) and OpenStreetMap blocks the map tiles. To see the map, host the page (for example on GitHub Pages) or run a local server: python3 -m http.server 8000, then open http://localhost:8000/ in your browser."}
 else{const tl=L.tileLayer(BASE.url,{maxZoom:19,attribution:BASE.attr,referrerPolicy:"strict-origin-when-cross-origin"}).addTo(map);
  let te=0;tl.on("tileerror",()=>{if(++te==3){tn.hidden=false;tn.textContent="Map tiles are not loading. Read the message written on a gray tile. If it mentions the Referer, a browser privacy setting, extension, or antivirus is probably removing it. See https://wiki.openstreetmap.org/wiki/Blocked_tiles"}})}
-let sel="2026-09-20",view=[2026,8],tab="map",fid=null,conf=false;
+const now=new Date();let sel=key(now),view=[now.getUTCFullYear(),now.getUTCMonth()],tab="map",fid=null,conf=false;
 function cal(){
  const[y,m]=view,f=new Date(Date.UTC(y,m,1)),off=(f.getUTCDay()+6)%7,n=new Date(Date.UTC(y,m+1,0)).getUTCDate();
  let h=`<div class="ch"><button data-m="-1" aria-label="Previous month">‹</button><b>${f.toLocaleString("en",{month:"long",year:"numeric",timeZone:"UTC"})}</b><button data-m="1" aria-label="Next month">›</button></div><div class="cg">`+"MTWTFSS".split("").map(d=>`<i>${d}</i>`).join("")+"<span></span>".repeat(off);
