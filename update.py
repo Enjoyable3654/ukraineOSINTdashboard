@@ -7,14 +7,15 @@ ALL daily data updates live in this one file.
   python update.py --inspect deepstate    print what one source returns; saves nothing
 
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
-rules. A source that returns map polygons ("kind": "occupation") needs nothing else. Other kinds (points, posts)
-get their own function in the CODE section and an entry in KINDS.
+rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
+need nothing else. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
 never overwrites good data.
 """
-import argparse, collections, datetime as dt, gzip, json, math, re, shutil, sys, time, urllib.request
+import argparse, collections, datetime as dt, gzip, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 try:
@@ -66,7 +67,31 @@ SOURCES = {
             {"category": "other",     "regex": "territories\\."},
         ],
     },
-    # "another_source": { ...copy the block above and change it... },
+    "ukrdaily": {
+        "enabled": True,
+        "kind": "kmz_layers",
+        "name": "UkrDailyUpdate",
+        "url": "https://map.ukrdailyupdate.com/",
+        # One KMZ file per layer per date. Files appear about 2 days after their date, so each run checks the
+        # last "lookback_days" days and saves every date not yet saved, under that date's own folder.
+        "endpoint": "https://map.ukrdailyupdate.com/kmz/{date}/{layer}.kmz",
+        "layers": ["Ukrainian", "Russians", "Contested Areas"],
+        "lookback_days": 7,
+        "simplify_degrees": 0.0001,
+        "cleanup_buffer_degrees": 0.00001,
+        # Matched against "<layer>|<shape colour>" (colour taken from each shape's KMZ style).
+        # Confirmed from the real 2026-09-22 files. "background" = whole-country shading (Russia, Belarus,
+        # Transnistria; Poland, Romania, Hungary, Slovakia, Moldova, Baltic states): left off the map by the
+        # user's decision (2026-09-26), but every left-off shape is listed by name in meta.json.
+        "rules": [
+            {"category": "ukraine",    "regex": "^Ukrainian\\|(0288D1|01579B)$"},
+            {"category": "russia",     "regex": "^Russians\\|FF5252$"},
+            {"category": "contested",  "regex": "^Contested Areas\\|FFD600$"},
+            {"category": "background", "regex": "^Ukrainian\\|1A237E$|^Russians\\|(A52714|880E4F|C2185B)$"},
+        ],
+        "leave_off_map": ["background"],
+    },
+    # "another_source": { ...copy a block above and change it... },
 }
 
 # =====================================================================================================
@@ -77,16 +102,17 @@ class SourceError(Exception):
     pass
 
 
-def fetch(url, tries=4, wait=4):
-    """Download JSON, retrying with growing pauses (4, 8, 16 s). Sends an honest, identifying User-Agent."""
+def fetch(url, accept="*/*", tries=4, wait=4):
+    """Download a file, retrying with growing pauses (4, 8, 16 s). Sends an honest, identifying User-Agent.
+    "Not found" (404) is not retried: it means the file does not exist (yet)."""
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
             with urllib.request.urlopen(req, timeout=60) as r:
-                return json.loads(r.read().decode("utf-8"))
+                return r.read()
         except Exception as e:
             print(f"  attempt {i + 1}/{tries} failed: {e}", file=sys.stderr)
-            if i == tries - 1:
+            if i == tries - 1 or getattr(e, "code", None) == 404:
                 raise
             time.sleep(wait)
             wait *= 2
@@ -214,7 +240,7 @@ def write_json(path, obj):
 def run_occupation(sid, cfg, args, day, now, data):
     """A source that returns map polygons: sort into categories, merge, save polygons/occupation.geojson."""
     try:
-        payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else fetch(cfg["endpoint"])
+        payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else json.loads(fetch(cfg["endpoint"], "application/json"))
     except Exception as e:
         raise SourceError(f"could not get data from {args.from_file or cfg['endpoint']}: {e}")
     fc = find_feature_collection(payload)
@@ -238,7 +264,73 @@ def run_occupation(sid, cfg, args, day, now, data):
         n_feat[cat] += 1
     if not polys:
         raise SourceError("the response contained no polygons; nothing saved (existing data left untouched).")
+    save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, {
+        "snapshot_time": snap, "endpoint": args.from_file or cfg["endpoint"], "skipped_non_polygon": dict(skipped)})
+    if args.keep_raw:
+        with gzip.open(data / day / sid / "raw.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
 
+
+def kml_shapes(kml):
+    """For each Placemark in a KML file: (name, colour from its style, list of polygons, non-polygon shape types)."""
+    for pm in ET.fromstring(kml).iterfind(".//{*}Placemark"):
+        m = re.search(r"[0-9A-Fa-f]{6}", pm.findtext("{*}styleUrl") or "")
+        polys = []
+        for pg in pm.iterfind(".//{*}Polygon"):
+            rings = [pg.find("{*}outerBoundaryIs//{*}coordinates")] + pg.findall("{*}innerBoundaryIs//{*}coordinates")
+            polys.append([xy([[float(v) for v in t.split(",")[:2]] for t in r.text.split()]) for r in rings if r is not None])
+        other = [t for t in ("Point", "LineString") if pm.find(".//{*}" + t) is not None]
+        yield (pm.findtext("{*}name") or "").strip(), m.group(0).upper() if m else "", polys, other
+
+
+def run_kmz_layers(sid, cfg, args, day, now, data):
+    """A source that publishes one KMZ (zipped KML) file per layer per date. Each date is saved in its own
+    day folder; dates already saved are skipped unless --date asks for one again."""
+    today = dt.date.fromisoformat(day)
+    dates = [day] if args.date else [(today - dt.timedelta(n)).isoformat() for n in range(cfg["lookback_days"] + 1)]
+    for d in dates:
+        if not args.date and not args.inspect and read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {}).get("status") == "ok":
+            continue
+        polys, labels, skipped, n_feat = collections.defaultdict(list), collections.defaultdict(set), collections.Counter(), collections.Counter()
+        seen = collections.Counter()
+        try:
+            for layer in cfg["layers"]:
+                url = cfg["endpoint"].format(date=d, layer=urllib.parse.quote(layer))
+                z = zipfile.ZipFile(io.BytesIO(fetch(url)))
+                kml = z.read(next(n for n in z.namelist() if n.lower().endswith(".kml")))
+                for name, colour, plist, other in kml_shapes(kml):
+                    for t in other:
+                        skipped[t] += 1
+                    if not plist:
+                        continue
+                    key = f"{layer}|{colour}"
+                    cat = classify(key, {}, cfg["rules"])
+                    label = re.sub(r"[\s\d/.:-]+$", "", name) or name   # drop trailing dates like "9/22"
+                    polys[cat].extend(plist)
+                    labels[cat].add(label)
+                    n_feat[cat] += 1
+                    seen[(key, label, cat)] += 1
+        except Exception as e:
+            if getattr(e, "code", None) == 404:
+                continue   # not published for this date (yet)
+            raise SourceError(f"could not read {url}: {e}")
+        if args.inspect:
+            print(f"Date {d}. Each distinct type (layer|colour | name): count -> category")
+            for (key, label, cat), n in sorted(seen.items()):
+                print(f"  {key} | {label}: {n} -> {cat}")
+            return print("Ignored non-polygon items:", dict(skipped))
+        save_polygons(sid, cfg, args, d, now, data, polys, labels, n_feat, {
+            "snapshot_time": d, "endpoint": cfg["endpoint"], "skipped_non_polygon": dict(skipped)})
+    print(f"[{sid}] checked {dates[-1]} to {dates[0]}")
+
+
+def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
+    """Merge each category's polygons, save data/<day>/<source>/polygons/occupation.geojson, log it in meta.json."""
+    hidden = set(cfg.get("leave_off_map", []))
+    left_off = {c: sorted(labels[c]) for c in polys if c in hidden}
+    polys = {c: p for c, p in polys.items() if c not in hidden}
+    if not polys:
+        raise SourceError(f"{day}: no polygons left to show; nothing saved (existing data left untouched).")
     features, by_cat, note = [], {}, ""
     for cat, plist in polys.items():
         geom, note = dissolve(plist, cfg["simplify_degrees"], cfg.get("cleanup_buffer_degrees", 0))
@@ -247,7 +339,7 @@ def run_occupation(sid, cfg, args, day, now, data):
         features.append({"type": "Feature", "geometry": geom, "properties": {
             "source": sid, "source_name": cfg["name"], "source_url": cfg["url"],
             "category": cat, "category_label": CATEGORIES.get(cat, {}).get("label", cat),
-            "snapshot_time": snap, "fetched_at_utc": now.isoformat(timespec="seconds"),
+            "snapshot_time": extra["snapshot_time"], "fetched_at_utc": now.isoformat(timespec="seconds"),
             "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
             "area_km2_approx": round(area), "processing": note}})
 
@@ -266,27 +358,28 @@ def run_occupation(sid, cfg, args, day, now, data):
     except Exception as e:
         raise SourceError(f"built the data but could not move it into place: {e}")
 
-    save_meta(data, day, sid, {
-        "status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "snapshot_time": snap,
-        "endpoint": args.from_file or cfg["endpoint"], "files": [f"{sid}/{filename}"], "by_category": by_cat,
-        "unmapped_labels": sorted(labels.get("unmapped", [])), "skipped_non_polygon": dict(skipped), "processing": note})
-    if args.keep_raw:
-        with gzip.open(data / day / sid / "raw.json.gz", "wt", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False)
+    entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra,
+             "files": [f"{sid}/{filename}"], "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
+             "processing": note}
+    if left_off:
+        entry["left_off_map"] = left_off
+    save_meta(data, day, sid, entry)
 
     print(f"[{sid}] saved {final_path}  ({note})")
     for cat, v in by_cat.items():
         print(f"  {cat}: {v['source_polygons']} source polygons, about {v['area_km2_approx']:,} km2")
+    if left_off:
+        print("  Left off the map:", left_off)
     if "unmapped" in by_cat:
         print("  WARNING: some types matched no rule:", "; ".join(sorted(labels["unmapped"])))
-    if skipped:
-        print("  Ignored non-polygon items:", dict(skipped))
+    if extra.get("skipped_non_polygon"):
+        print("  Ignored non-polygon items:", extra["skipped_non_polygon"])
 
 
-KINDS = {"occupation": run_occupation}   # add new kinds of source here
+KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
-KIND_FILENAMES = {"occupation": "polygons/occupation.geojson"}
+KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson"}
 
 
 def save_meta(data, day, sid, entry):

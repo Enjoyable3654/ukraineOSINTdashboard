@@ -148,12 +148,12 @@ async function loadOcc(){
 function drawOcc(){
  ol.clearLayers();const st=$("#os"),oc=$("#oc");
  if(!OCC){st.textContent="No occupation data for this day yet. It appears after the daily data job has run.";oc.innerHTML="";return}
- const cs=[...new Set(OCC.features.map(f=>f.properties.category))],ct=c=>CATS[c]||{};
- st.innerHTML='Occupation layer: <a href="https://deepstatemap.live/en" target="_blank" rel="noopener">DeepStateMap</a> ';
- oc.innerHTML=cs.map(c=>`<label><input type="checkbox" data-oc="${esc(c)}" ${occOn[c]===false?"":"checked"}><span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}</label> `).join("");
- L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.category]!==false,
+ const cs=[...new Set(OCC.features.map(f=>f.properties.category))],ct=c=>CATS[c]||{},ss=new Map(OCC.features.map(f=>[f.properties.source,f.properties]));
+ st.innerHTML="Occupation layers: "+cs.map(c=>`<span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}`).join(" ")+" · Sources: ";
+ oc.innerHTML=[...ss].map(([s,p])=>`<label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.source_url)}" target="_blank" rel="noopener">${esc(p.source_name)}</a></label> `).join("");
+ L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.source]!==false,
   style:f=>{const k=ct(f.properties.category).color||"#444";return{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
-  onEachFeature:(f,l)=>{const p=f.properties;l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)}<br>Original types: ${esc(p.source_labels.join("; "))}<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²<br>Fetched: ${esc(p.fetched_at_utc)}`)}}).addTo(ol)}
+  onEachFeature:(f,l)=>{const p=f.properties;l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>Original types: ${esc(p.source_labels.join("; "))}<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²<br>Fetched: ${esc(p.fetched_at_utc)}`)}}).addTo(ol)}
 /* GeoTIFF upload: parsed and reprojected in the browser, nothing leaves the device */
 const RL=[];
 function crs(c){
