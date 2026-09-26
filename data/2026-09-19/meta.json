@@ -1,0 +1,1 @@
+{"date":"2026-09-19","sources":{"geoconfirmed":{"status":"ok","fetched_at_utc":"2026-09-26T20:49:00+00:00","endpoint":"https://geoconfirmed.org/api/Map/export/Ukraine/csv?start=2026-09-19&end=2026-09-26","files":["geoconfirmed/points/events.geojson"],"events":33,"by_side":{"Neutral":6,"Ukraine":16,"Russia":10,"Unknown":1},"category_not_found":0}}}

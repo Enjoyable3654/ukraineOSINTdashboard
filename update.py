@@ -8,13 +8,13 @@ ALL daily data updates live in this one file.
 
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
 rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
-need nothing else. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
+need nothing else. "geoconfirmed" saves GeoConfirmed's geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
 never overwrites good data.
 """
-import argparse, collections, datetime as dt, gzip, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, collections, csv, datetime as dt, gzip, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -90,6 +90,21 @@ SOURCES = {
             {"category": "background", "regex": "^Ukrainian\\|1A237E$|^Russians\\|(A52714|880E4F|C2185B)$"},
         ],
         "leave_off_map": ["background"],
+    },
+    "geoconfirmed": {
+        "enabled": True,
+        "kind": "geoconfirmed",
+        "name": "GeoConfirmed",
+        "url": "https://geoconfirmed.org/map/ukraine",
+        "conflict": "Ukraine",
+        # Public, no-login API (https://geoconfirmed.org/scalar/v1). Three requests per run:
+        # the CSV has each event's text fields; the GeoJSON and icon list give each event's category.
+        "csv": "https://geoconfirmed.org/api/Map/export/{conflict}/csv?start={start}&end={end}",
+        "geojson": "https://geoconfirmed.org/api/Placemark/{conflict}/geojson",
+        "icons": "https://geoconfirmed.org/api/Placemark/{conflict}/icons",
+        "placemark_link": "https://geoconfirmed.org/map/ukraine/{id}",
+        # Events keep being added for past dates, so each run re-saves the last "lookback_days" days.
+        "lookback_days": 7,
     },
     # "another_source": { ...copy a block above and change it... },
 }
@@ -324,6 +339,74 @@ def run_kmz_layers(sid, cfg, args, day, now, data):
     print(f"[{sid}] checked {dates[-1]} to {dates[0]}")
 
 
+def put_in_place(args, data, day, sid, filename, features):
+    """Write to a working folder first, and only move the finished file into data/ once it is complete.
+    If anything before this raises an exception, nothing here runs, so a half-built file never reaches data/
+    and a day already saved from an earlier successful run is left untouched."""
+    work_path = args.working_dir_path / day / sid / filename
+    write_json(work_path, {"type": "FeatureCollection", "features": features})
+    final_path = data / day / sid / filename
+    try:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if final_path.exists():
+            final_path.unlink()
+        shutil.move(str(work_path), str(final_path))
+    except Exception as e:
+        raise SourceError(f"built the data but could not move it into place: {e}")
+    return final_path
+
+
+def run_geoconfirmed(sid, cfg, args, day, now, data):
+    """GeoConfirmed's geolocated events, saved as map points in each event's own date folder.
+    Fields are copied as GeoConfirmed gives them (category = GeoConfirmed's icon name). Events with no date
+    (permanent sites such as power plants) are counted in meta.json but not saved to any day."""
+    end = dt.date.fromisoformat(day)
+    start = end if args.date else end - dt.timedelta(cfg["lookback_days"])
+    csv_url = cfg["csv"].format(conflict=cfg["conflict"], start=start, end=end)
+    try:
+        rows = list(csv.DictReader(io.StringIO(fetch(csv_url).decode("utf-8-sig")), delimiter=";"))
+        gj = json.loads(fetch(cfg["geojson"].format(conflict=cfg["conflict"]), "application/json"))
+        icons = json.loads(fetch(cfg["icons"].format(conflict=cfg["conflict"]), "application/json"))
+    except Exception as e:
+        raise SourceError(f"could not get data from GeoConfirmed: {e}")
+    gj = json.loads(gj["geojson"]) if isinstance(gj.get("geojson"), str) else gj.get("geojson", gj)
+    icon_of = {f["properties"]["id"]: f["properties"].get("icon") for f in gj["features"]}
+    icon_name = {i["icon"]: i["name"] for f in icons for i in f["icons"]}
+    side_color = {f["name"]: f["color"] for f in icons}
+    links = lambda t: re.findall(r"https?://[^\s,]+", t or "")
+    by_day, undated, no_category = collections.defaultdict(list), 0, 0
+    for r in rows:
+        d = (r.get("Date") or "")[:10]
+        if not d:
+            undated += 1
+            continue
+        icon = icon_of.get(r["Id"])
+        cat = icon_name.get(icon)
+        if not cat:
+            no_category += 1
+            cat = f"(category not found: {icon})"
+        by_day[d].append({"type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [round(float(r["Longitude"]), 6), round(float(r["Latitude"]), 6)]},
+            "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": r["Id"], "date": d,
+                "link": cfg["placemark_link"].format(id=r["Id"]), "category": cat, "side": r["Faction"],
+                "color": side_color.get(r["Faction"], "#666666"), "description": r["Description"].strip(),
+                "orbat": [u.strip() for u in (r["OrbatUnits"] or r["Units"]).split("|") if u.strip()],
+                "geolocation": links(r["Geolocation"]), "sources": links(r["Source"])}})
+    if args.inspect:
+        print(f"{len(rows)} rows from {start} to {end}: {undated} undated; per day:", {d: len(v) for d, v in sorted(by_day.items())})
+        print("Categories:", collections.Counter(f["properties"]["category"][:60] for v in by_day.values() for f in v).most_common())
+        return
+    filename = KIND_FILENAMES[cfg["kind"]]
+    for d, features in sorted(by_day.items()):
+        path = put_in_place(args, data, d, sid, filename, features)
+        save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "endpoint": csv_url,
+            "files": [f"{sid}/{filename}"], "events": len(features),
+            "by_side": dict(collections.Counter(f["properties"]["side"] for f in features)), "category_not_found": sum(
+                1 for f in features if f["properties"]["category"].startswith("(category not found"))})
+        print(f"[{sid}] saved {path}  ({len(features)} events)")
+    print(f"[{sid}] checked {start} to {end}; skipped {undated} undated placemarks; {no_category} events had no category match")
+
+
 def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
     """Merge each category's polygons, save data/<day>/<source>/polygons/occupation.geojson, log it in meta.json."""
     hidden = set(cfg.get("leave_off_map", []))
@@ -343,21 +426,8 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
             "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
             "area_km2_approx": round(area), "processing": note}})
 
-    # Write to a working folder first, and only move the finished file into data/ once it is complete.
-    # If anything above raises an exception, nothing here runs, so a half-built file never reaches data/
-    # and a day already saved from an earlier successful run is left untouched.
     filename = KIND_FILENAMES[cfg["kind"]]
-    work_path = args.working_dir_path / day / sid / filename
-    write_json(work_path, {"type": "FeatureCollection", "features": features})
-    final_path = data / day / sid / filename
-    try:
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        if final_path.exists():
-            final_path.unlink()
-        shutil.move(str(work_path), str(final_path))
-    except Exception as e:
-        raise SourceError(f"built the data but could not move it into place: {e}")
-
+    final_path = put_in_place(args, data, day, sid, filename, features)
     entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra,
              "files": [f"{sid}/{filename}"], "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
              "processing": note}
@@ -376,10 +446,11 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
         print("  Ignored non-polygon items:", extra["skipped_non_polygon"])
 
 
-KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers}   # add new kinds of source here
+KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
-KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson"}
+KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
+                  "geoconfirmed": "points/events.geojson"}
 
 
 def save_meta(data, day, sid, entry):

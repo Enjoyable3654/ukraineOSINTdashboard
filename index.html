@@ -136,7 +136,7 @@ async function loadOcc(){
   if(!Object.keys(CATS).length)CATS=(await(await fetch("data/categories.json")).json()).categories;
   const meta=await(await fetch(`data/${day}/meta.json`)).json();
   /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
-  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/polygons/occupation.geojson"));
+  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/polygons/occupation.geojson")||f.endsWith("/points/events.geojson"));
   const parts=await Promise.all(files.map(async f=>{
    try{const r=await fetch(`data/${day}/${f}`);if(!r.ok)return[];return(await r.json()).features}catch(e){return[]}
   }));
@@ -148,12 +148,19 @@ async function loadOcc(){
 function drawOcc(){
  ol.clearLayers();const st=$("#os"),oc=$("#oc");
  if(!OCC){st.textContent="No occupation data for this day yet. It appears after the daily data job has run.";oc.innerHTML="";return}
- const cs=[...new Set(OCC.features.map(f=>f.properties.category))],ct=c=>CATS[c]||{},ss=new Map(OCC.features.map(f=>[f.properties.source,f.properties]));
- st.innerHTML="Occupation layers: "+cs.map(c=>`<span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}`).join(" ")+" · Sources: ";
+ const pt=f=>f.geometry.type=="Point",cs=[...new Set(OCC.features.filter(f=>!pt(f)).map(f=>f.properties.category))],ct=c=>CATS[c]||{},ss=new Map(OCC.features.map(f=>[f.properties.source,f.properties]));
+ st.innerHTML="Areas: "+cs.map(c=>`<span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}`).join(" ")+" · Sources: ";
  oc.innerHTML=[...ss].map(([s,p])=>`<label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.source_url)}" target="_blank" rel="noopener">${esc(p.source_name)}</a></label> `).join("");
  L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.source]!==false,
-  style:f=>{const k=ct(f.properties.category).color||"#444";return{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
-  onEachFeature:(f,l)=>{const p=f.properties;l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>Original types: ${esc(p.source_labels.join("; "))}<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²<br>Fetched: ${esc(p.fetched_at_utc)}`)}}).addTo(ol)}
+  pointToLayer:(f,ll)=>L.circleMarker(ll,{pane:"markerPane",radius:6}),
+  style:f=>{if(pt(f))return{color:"#fff",weight:1.5,fillColor:f.properties.color,fillOpacity:.9};const k=ct(f.properties.category).color||"#444";return{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
+  onEachFeature:(f,l)=>{const p=f.properties;if(pt(f))return l.bindPopup(evPop(p),{maxWidth:340});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>Original types: ${esc(p.source_labels.join("; "))}<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²<br>Fetched: ${esc(p.fetched_at_utc)}`)}}).addTo(ol)}
+/* GeoConfirmed event popup: fields copied as GeoConfirmed gives them; media are only linked, never embedded */
+const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
+const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><br><span class="mut">${esc(p.date)} · ${esc(p.side)}</span><p>${esc(p.description)}</p>`+
+ (p.orbat.length?`<b>ORBAT:</b> ${p.orbat.map(esc).join("; ")}<br>`:"")+
+ `<b>Geolocation:</b><br>${p.geolocation.map(lk).join("<br>")||"none listed"}<br><b>Sources:</b><br>${p.sources.map(lk).join("<br>")||"none listed"}<br>`+
+ `<b>Source:</b> <a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.source_name)} placemark</a></div>`;
 /* GeoTIFF upload: parsed and reprojected in the browser, nothing leaves the device */
 const RL=[];
 function crs(c){
