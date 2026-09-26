@@ -134,8 +134,14 @@ async function loadOcc(){
  const day=sel;OCC=null;
  try{
   if(!Object.keys(CATS).length)CATS=(await(await fetch("data/categories.json")).json()).categories;
-  const r=await fetch(`data/${day}/occupation.geojson`);if(!r.ok)throw 0;
-  const j=await r.json();if(day!==sel)return;OCC=j
+  const meta=await(await fetch(`data/${day}/meta.json`)).json();
+  const ids=Object.keys(meta.sources||{}).filter(k=>meta.sources[k].status==="ok");
+  const parts=await Promise.all(ids.map(async id=>{
+   try{const r=await fetch(`data/${day}/${id}/polygons.geojson`);if(!r.ok)return[];return(await r.json()).features}catch(e){return[]}
+  }));
+  const feats=parts.flat();
+  if(day!==sel)return;
+  OCC=feats.length?{type:"FeatureCollection",features:feats}:null
  }catch(e){}
  drawOcc()}
 function drawOcc(){

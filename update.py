@@ -14,7 +14,7 @@ Nothing is dropped silently: polygons that match no rule are kept as category "u
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
 never overwrites good data.
 """
-import argparse, collections, datetime as dt, gzip, json, math, re, sys, time, urllib.request
+import argparse, collections, datetime as dt, gzip, json, math, re, shutil, sys, time, urllib.request
 from pathlib import Path
 
 try:
@@ -35,7 +35,7 @@ USER_AGENT = "ukraine-osint-dashboard/1.0 (+https://github.com/Enjoyable3654/ukr
 CATEGORIES = {   # shared by all sources; the map's checkboxes use these
     "ukraine":   {"label": "Ukraine-controlled / recently liberated", "color": "#2a7de1"},
     "russia":    {"label": "Russian-occupied", "color": "#d64545"},
-    "contested": {"label": "Contested / needs clarification", "color": "#e0a800"},
+    "contested": {"label": "Contested / unknown status", "color": "#e0a800"},
     "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0"},
     "other":     {"label": "Other", "color": "#7f8c8d"},
     "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
@@ -47,18 +47,23 @@ SOURCES = {
         "kind": "occupation",
         "name": "DeepStateMap",
         "url": "https://deepstatemap.live/en",
-        "endpoint": "https://deepstatemap.live/api/history/last",   # not yet tested live by Claude
-        "name_separator": "///",      # DeepState names look like "<Ukrainian> /// <English>"
-        "name_part": 1,               # keep the English part
+        "endpoint": "https://deepstatemap.live/api/history/last",   # confirmed working from a real inspect run
+        "name_separator": "///",      # DeepState names look like "<Ukrainian> /// <English> /// <stable code>"
+        "name_part": 1,               # keep the English part (for display: popups, source_labels)
+        "classify_part": 2,           # match rules against the stable code instead (does not change with wording)
         "simplify_degrees": 0.0001,   # about 11 m; raise it if files get too big
         "cleanup_buffer_degrees": 0.00001,   # about 1 m, closes hairline seams after merging
         # First matching rule wins. Anything matching nothing becomes "unmapped" and is still shown.
-        # The "russia" rule is confirmed; the other three are PROPOSED guesses until the inspect run shows real names.
+        # Confirmed from a real inspect run against DeepState's own codes (2026-09-26).
+        # "other" = DeepState's other Russian territorial claims not part of the Ukraine war
+        # (Abkhazia, Tskhinvali/South Ossetia, Kuril Islands, Baltic border districts, Finland's
+        # Petsamo/Salla, Chechnya/Ichkeria, Karelia, East Prussia, Transnistria). Kept, not hidden,
+        # but shown separately so they are never mixed into the Ukraine-occupation shape.
         "rules": [
-            {"category": "russia",    "names": ["Occupied", "Occupied Crimea", "CADR and CALR"]},
-            {"category": "contested", "regex": "clarif|grey|gray|contested|уточн|сір"},
-            {"category": "ukraine",   "regex": "liberat|звільн"},
-            {"category": "other",     "regex": "transnistria|придністров"},
+            {"category": "russia",    "regex": "status\\.occupied|territories\\.(crimea|ordlo|tuzla)"},
+            {"category": "ukraine",   "regex": "status\\.dismissed|zmiinyi_island"},
+            {"category": "contested", "regex": "status\\.unknown"},
+            {"category": "other",     "regex": "territories\\."},
         ],
     },
     # "another_source": { ...copy the block above and change it... },
@@ -101,14 +106,31 @@ def find_feature_collection(node):
     return None
 
 
-def label_of(props, cfg):
+def name_parts(props, sep):
     raw = str(props.get("name") or "").strip()
-    sep = cfg.get("name_separator")
     if sep and sep in raw:
-        parts = [p.strip() for p in raw.split(sep)]
-        i = cfg.get("name_part", 1)
-        raw = parts[i] if i < len(parts) else parts[-1]
-    return raw or str(props.get("fill") or "(no label)")
+        return [p.strip() for p in raw.split(sep)]
+    return [raw] if raw else []
+
+
+def label_of(props, cfg):
+    """Human-readable label, for display (popups, source_labels)."""
+    parts = name_parts(props, cfg.get("name_separator"))
+    i = cfg.get("name_part", 1)
+    if parts:
+        return parts[i] if i < len(parts) else parts[-1]
+    return str(props.get("fill") or "(no label)")
+
+
+def classify_key(props, cfg):
+    """Text matched against category rules. Some sources put a stable machine code in a separate
+    part of the name (set "classify_part" to its index) that will not change even if the source
+    rewords its display text; falls back to the display label if there is no such part."""
+    parts = name_parts(props, cfg.get("name_separator"))
+    i = cfg.get("classify_part", cfg.get("name_part", 1))
+    if parts:
+        return parts[i] if i < len(parts) else parts[-1]
+    return label_of(props, cfg)
 
 
 def classify(label, props, rules):
@@ -169,13 +191,13 @@ def print_inspect(payload, fc, cfg):
     groups = collections.defaultdict(lambda: [0, 0.0])
     for f in fc["features"]:
         g, props = f.get("geometry") or {}, f.get("properties") or {}
-        key = (label_of(props, cfg), props.get("fill"), props.get("stroke"), g.get("type"))
+        key = (label_of(props, cfg), classify_key(props, cfg), props.get("fill"), props.get("stroke"), g.get("type"))
         groups[key][0] += 1
         groups[key][1] += polygons_area_km2(to_polygons(g))
-    print("\nEach distinct type found (label | fill | stroke | shape): count, approx km2 -> category it would get")
-    for (label, fill, stroke, gt), (n, area) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
-        cat = classify(label, {"fill": fill, "stroke": stroke}, cfg["rules"]) if gt in ("Polygon", "MultiPolygon") else "(not a polygon, ignored)"
-        print(f"  {label} | {fill} | {stroke} | {gt}: {n}, {area:,.0f} -> {cat}")
+    print("\nEach distinct type found (label | match-key | fill | stroke | shape): count, approx km2 -> category it would get")
+    for (label, ckey, fill, stroke, gt), (n, area) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
+        cat = classify(ckey, {"fill": fill, "stroke": stroke}, cfg["rules"]) if gt in ("Polygon", "MultiPolygon") else "(not a polygon, ignored)"
+        print(f"  {label} | {ckey} | {fill} | {stroke} | {gt}: {n}, {area:,.0f} -> {cat}")
     sample = next((f.get("properties") for f in fc["features"] if f.get("properties")), None)
     print("\nExample of one feature's raw properties:", json.dumps(sample, ensure_ascii=False)[:600])
 
@@ -210,7 +232,7 @@ def run_occupation(sid, cfg, args, day, now, data):
             skipped[str(g.get("type"))] += 1
             continue
         label = label_of(props, cfg)
-        cat = classify(label, props, cfg["rules"])
+        cat = classify(classify_key(props, cfg), props, cfg["rules"])
         polys[cat].extend(parts)
         labels[cat].add(label)
         n_feat[cat] += 1
@@ -229,18 +251,30 @@ def run_occupation(sid, cfg, args, day, now, data):
             "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
             "area_km2_approx": round(area), "processing": note}})
 
-    occ_path = data / day / "occupation.geojson"
-    kept = [f for f in read_json(occ_path, {"features": []})["features"] if f["properties"].get("source") != sid]
-    write_json(occ_path, {"type": "FeatureCollection", "features": kept + features})
+    # Write to a working folder first, and only move the finished file into data/ once it is complete.
+    # If anything above raises an exception, nothing here runs, so a half-built file never reaches data/
+    # and a day already saved from an earlier successful run is left untouched.
+    filename = KIND_FILENAMES[cfg["kind"]]
+    work_path = args.working_dir_path / day / sid / filename
+    write_json(work_path, {"type": "FeatureCollection", "features": features})
+    final_path = data / day / sid / filename
+    try:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if final_path.exists():
+            final_path.unlink()
+        shutil.move(str(work_path), str(final_path))
+    except Exception as e:
+        raise SourceError(f"built the data but could not move it into place: {e}")
+
     save_meta(data, day, sid, {
         "status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "snapshot_time": snap,
         "endpoint": args.from_file or cfg["endpoint"], "by_category": by_cat,
         "unmapped_labels": sorted(labels.get("unmapped", [])), "skipped_non_polygon": dict(skipped), "processing": note})
     if args.keep_raw:
-        with gzip.open(data / day / f"{sid}_raw.json.gz", "wt", encoding="utf-8") as fh:
+        with gzip.open(final_path.parent / "raw.json.gz", "wt", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
 
-    print(f"[{sid}] saved {occ_path}  ({note})")
+    print(f"[{sid}] saved {final_path}  ({note})")
     for cat, v in by_cat.items():
         print(f"  {cat}: {v['source_polygons']} source polygons, about {v['area_km2_approx']:,} km2")
     if "unmapped" in by_cat:
@@ -250,6 +284,7 @@ def run_occupation(sid, cfg, args, day, now, data):
 
 
 KINDS = {"occupation": run_occupation}   # add new kinds of source here
+KIND_FILENAMES = {"occupation": "polygons.geojson"}   # output filename saved under data/<day>/<source>/
 
 
 def save_meta(data, day, sid, entry):
@@ -266,6 +301,7 @@ def main():
     ap.add_argument("--from-file", help="use a saved response instead of the network (testing; needs --only)")
     ap.add_argument("--date", help="folder date YYYY-MM-DD (default: today, UTC)")
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
+    ap.add_argument("--working-dir", default=str(ROOT / "data_working"), help="scratch space; never committed, cleared after each run")
     ap.add_argument("--keep-raw", action="store_true", help="also save the raw response as .json.gz (large)")
     args = ap.parse_args()
 
@@ -282,6 +318,7 @@ def main():
     now = dt.datetime.now(dt.timezone.utc)
     day = args.date or now.strftime("%Y-%m-%d")
     data = Path(args.data_dir)
+    args.working_dir_path = Path(args.working_dir)
     failed, worked = [], []
     for sid in ids:
         cfg = SOURCES[sid]
@@ -296,8 +333,11 @@ def main():
 
     if worked and not args.inspect:
         write_json(data / "categories.json", {"categories": CATEGORIES})
-        dates = sorted(p.parent.name for p in data.glob("*/occupation.geojson"))
+        # A day "has data" once at least one source folder exists under it (a source only gets a
+        # folder once its file has been fully moved into place, so a half-finished run never counts).
+        dates = sorted(p.name for p in data.iterdir() if p.is_dir() and any(c.is_dir() for c in p.iterdir()))
         write_json(data / "index.json", {"dates": dates, "updated_utc": now.isoformat(timespec="seconds")})
+    shutil.rmtree(args.working_dir_path, ignore_errors=True)   # scratch space only; data/ already has the real copy
     if failed:
         sys.exit(1)
 
