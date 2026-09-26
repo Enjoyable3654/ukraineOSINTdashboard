@@ -8,7 +8,7 @@ ALL daily data updates live in this one file.
 
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
 rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
-need nothing else. "geoconfirmed" saves GeoConfirmed's geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
+need nothing else. "geoconfirmed" and "warspotting" save geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
@@ -105,6 +105,21 @@ SOURCES = {
         "placemark_link": "https://geoconfirmed.org/map/ukraine/{id}",
         # Events keep being added for past dates, so each run re-saves the last "lookback_days" days.
         "lookback_days": 7,
+    },
+    "warspotting": {
+        "enabled": True,
+        "kind": "warspotting",
+        "name": "WarSpotting",
+        "url": "https://ukr.warspotting.net/",
+        # Official API (https://ukr.warspotting.net/api/docs/). Reuse allowed for non-profit use and news with credit
+        # (a link). Max 10 requests per 10 s, so requests are spaced out. Only Russian losses are covered.
+        "day": "https://ukr.warspotting.net/api/losses/russia/{date}/{page}/",
+        "recently_added": "https://ukr.warspotting.net/api/losses/russia/",
+        "loss_link": "https://ukr.warspotting.net/view/{id}/",
+        # Losses are filed under the date they were lost but often added weeks later. Each run re-reads the last
+        # "lookback_days" days in full, plus the 100 most recently added (any date), merged by ID.
+        "lookback_days": 7,
+        "color": "#E00000",
     },
     # "another_source": { ...copy a block above and change it... },
 }
@@ -407,6 +422,64 @@ def run_geoconfirmed(sid, cfg, args, day, now, data):
     print(f"[{sid}] checked {start} to {end}; skipped {undated} undated placemarks; {no_category} events had no category match")
 
 
+def run_warspotting(sid, cfg, args, day, now, data):
+    """WarSpotting's documented equipment losses, saved as map points in each loss's own date folder.
+    Losses with no coordinates are left off the map; their IDs are listed in meta.json. Every loss is keyed
+    by its WarSpotting ID, so one fetched twice, or already saved, is never duplicated."""
+    end = dt.date.fromisoformat(day)
+    full_days = [(end - dt.timedelta(n)).isoformat() for n in range(0 if args.date else cfg["lookback_days"], -1, -1)]
+    get = lambda url: (time.sleep(1.1), json.loads(fetch(url, "application/json"))["losses"])[1]   # stays under 10 per 10 s
+    losses = {}
+    try:
+        for d in full_days:
+            page = 1
+            while True:
+                batch = get(cfg["day"].format(date=d, page=page))
+                losses.update({x["id"]: x for x in batch})
+                if len(batch) < 100:
+                    break
+                page += 1
+        if not args.date:
+            losses.update({x["id"]: x for x in get(cfg["recently_added"])})
+    except Exception as e:
+        raise SourceError(f"could not get data from WarSpotting: {e}")
+    by_day = collections.defaultdict(dict)
+    for x in losses.values():
+        by_day[x["date"]][x["id"]] = x
+    if args.inspect:
+        print({d: len(v) for d, v in sorted(by_day.items())})
+        return print("Without coordinates:", sum(1 for x in losses.values() if not x.get("geo")), "of", len(losses))
+    filename = KIND_FILENAMES[cfg["kind"]]
+    for d in sorted(set(by_day) | set(full_days)):
+        new = by_day.get(d, {})
+        old_meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {})
+        if d in full_days:   # re-read in full: replaces what was saved before
+            features, no_geo = {}, set()
+        else:                # only some of this day's losses were fetched: merge into what is saved
+            saved = read_json(data / d / sid / filename, {"features": []})["features"]
+            features, no_geo = {f["properties"]["id"]: f for f in saved}, set(old_meta.get("no_coordinates_ids", []))
+        for i, x in new.items():
+            if not x.get("geo"):
+                no_geo.add(i)
+                continue
+            lat, lon = (float(v) for v in x["geo"].split(","))
+            features[i] = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
+                "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": i, "date": d,
+                    "link": cfg["loss_link"].format(id=i), "category": x.get("type") or "", "side": f"Lost by {x.get('lost_by')}",
+                    "color": cfg["color"], "description": " · ".join(v for v in [x.get("model"), x.get("status"),
+                        x.get("nearest_location") and f"near {x['nearest_location']}", x.get("tags") and f"tags: {x['tags']}"] if v),
+                    "orbat": [x["unit"]] if x.get("unit") else []}}
+        if not features and not no_geo:
+            continue
+        entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "endpoint": cfg["day"].format(date=d, page=1),
+                 "events": len(features), "no_coordinates": len(no_geo), "no_coordinates_ids": sorted(no_geo)}
+        if features:
+            put_in_place(args, data, d, sid, filename, list(features.values()))
+            entry["files"] = [f"{sid}/{filename}"]
+        save_meta(data, d, sid, entry)
+        print(f"[{sid}] {d}: {len(features)} on map, {len(no_geo)} without coordinates (left off)")
+
+
 def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
     """Merge each category's polygons, save data/<day>/<source>/polygons/occupation.geojson, log it in meta.json."""
     hidden = set(cfg.get("leave_off_map", []))
@@ -446,11 +519,12 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
         print("  Ignored non-polygon items:", extra["skipped_non_polygon"])
 
 
-KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed}   # add new kinds of source here
+KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
+         "warspotting": run_warspotting}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
-                  "geoconfirmed": "points/events.geojson"}
+                  "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson"}
 
 
 def save_meta(data, day, sid, entry):

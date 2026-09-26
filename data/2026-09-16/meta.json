@@ -1,0 +1,1 @@
+{"date":"2026-09-16","sources":{"warspotting":{"status":"ok","fetched_at_utc":"2026-09-26T23:43:50+00:00","endpoint":"https://ukr.warspotting.net/api/losses/russia/2026-09-16/1/","events":1,"no_coordinates":4,"no_coordinates_ids":[47055,47118,47120,47121],"files":["warspotting/points/events.geojson"]}}}
