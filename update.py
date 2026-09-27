@@ -170,6 +170,16 @@ SOURCES = {
         "lookback_days": 2,
         "max_pages": 10,
     },
+    "ru_mod": {
+        "enabled": True,
+        "kind": "telegram_posts",
+        "name": "Ministry of Defence of Russia",
+        "url": "https://t.me/s/mod_russia",
+        "channel": "mod_russia",
+        "group": "official_ru",
+        "lookback_days": 2,
+        "max_pages": 10,
+    },
     # "another_source": { ...copy a block above and change it... },
 }
 
