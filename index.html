@@ -105,11 +105,12 @@ document.addEventListener("change",e=>{if(e.target.dataset.oc){occOn[e.target.da
 /* Occupation polygons from data/<date>/<source>/polygons/occupation.geojson, built by the daily job */
 map.createPane("occ").style.zIndex=450;
 const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let OCC=null,CATS={},occOn={},occFor=null;
+let OCC=null,CATS={},SRCS={},occOn={},occFor=null;
 async function loadOcc(){
  const day=sel;OCC=null;
  try{
   if(!Object.keys(CATS).length)CATS=(await(await fetch("data/categories.json")).json()).categories;
+  if(!Object.keys(SRCS).length)SRCS=(await(await fetch("data/sources.json")).json()).sources;
   const meta=await(await fetch(`data/${day}/meta.json`)).json();
   /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
   const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/polygons/occupation.geojson")||f.endsWith("/points/events.geojson"));
@@ -123,10 +124,12 @@ async function loadOcc(){
  drawOcc()}
 function drawOcc(){
  ol.clearLayers();const st=$("#os"),oc=$("#oc");
- if(!OCC){st.textContent="No occupation data for this day yet. It appears after the daily data job has run.";oc.innerHTML="";return}
- const pt=f=>f.geometry.type=="Point",cs=[...new Set(OCC.features.filter(f=>!pt(f)).map(f=>f.properties.category))],ct=c=>CATS[c]||{},ss=new Map(OCC.features.map(f=>[f.properties.source,f.properties]));
- st.innerHTML="Areas: "+cs.map(c=>`<span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}`).join(" ")+" · Sources: ";
- oc.innerHTML=[...ss].map(([s,p])=>`<label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.source_url)}" target="_blank" rel="noopener">${esc(p.source_name)}</a></label> `).join("");
+ const fs=OCC?OCC.features:[],has=new Set(fs.map(f=>f.properties.source));
+ /* every source always gets a checkbox, even on days it has nothing */
+ oc.innerHTML=Object.entries(SRCS).map(([s,p])=>`<label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>${has.has(s)?"":' <span class="mut">(nothing this day)</span>'}</label> `).join("");
+ if(!OCC){st.textContent="No map data for this day yet. Sources: ";return}
+ const pt=f=>f.geometry.type=="Point",cs=[...new Set(fs.filter(f=>!pt(f)).map(f=>f.properties.category))],ct=c=>CATS[c]||{};
+ st.innerHTML=(cs.length?"Areas: "+cs.map(c=>`<span class="dot" style="background:${esc(ct(c).color||"#444")}"></span>${esc(ct(c).label||c)}`).join(" ")+" · ":"")+"Sources: ";
  L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.source]!==false,
   pointToLayer:(f,ll)=>L.circleMarker(ll,{pane:"markerPane",radius:6}),
   style:f=>{if(pt(f))return{color:"#fff",weight:1.5,fillColor:f.properties.color,fillOpacity:.9};const k=ct(f.properties.category).color||"#444";return{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},

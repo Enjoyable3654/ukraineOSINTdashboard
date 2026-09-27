@@ -663,6 +663,9 @@ def main():
 
     if worked and not args.inspect:
         write_json(data / "categories.json", {"categories": CATEGORIES})
+        # the map shows one checkbox per source listed here, even on days a source has nothing
+        write_json(data / "sources.json", {"sources": {k: {"name": v["name"], "url": v["url"]}
+                                                       for k, v in SOURCES.items() if v.get("enabled", True)}})
         # A day "has data" once at least one source folder exists under it (a source only gets a
         # folder once its file has been fully moved into place, so a half-finished run never counts).
         dates = sorted(p.name for p in data.iterdir() if p.is_dir() and any(c.is_dir() for c in p.iterdir()))
