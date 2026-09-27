@@ -137,12 +137,16 @@ function drawOcc(){
 /* Search: words (all must appear), AND, OR, NOT, (brackets), "exact phrases"; not case-sensitive.
    Returns a test function, or null if the search can't be read (e.g. an extra closing bracket). */
 function qparse(q){
- const t=q.match(/"[^"]*"|\(|\)|[^\s()"]+/g)||[],up=()=>(t[i]||"").toUpperCase();let i=0;
+ const t=q.match(/"[^"]*"|\(|\)|[^\s()"]+/g)||[],up=()=>(t[i]||"").toUpperCase(),terms=[];let i=0,neg=false;
  const orx=()=>{let a=andx();while(up()=="OR"){i++;const l=a,r=andx();a=x=>l(x)||r(x)}return a},
   andx=()=>{let a=notx();while(i<t.length&&up()!="OR"&&t[i]!=")"){if(up()=="AND")i++;const l=a,r=notx();a=x=>l(x)&&r(x)}return a},
-  notx=()=>{if(up()=="NOT"){i++;const f=notx();return x=>!f(x)}if(t[i]=="("){i++;const f=orx();if(t[i]==")")i++;return f}
-   const w=(t[i++]||"").replace(/"/g,"").toLowerCase();return x=>x.includes(w)};
- const f=orx();return i<t.length?null:f}
+  notx=()=>{if(up()=="NOT"){i++;neg=!neg;const f=notx();neg=!neg;return x=>!f(x)}if(t[i]=="("){i++;const f=orx();if(t[i]==")")i++;return f}
+   const w=(t[i++]||"").replace(/"/g,"").toLowerCase();if(w&&!neg)terms.push(w);return x=>x.includes(w)};
+ const f=orx();f.terms=terms;return i<t.length?null:f}
+/* Post text with the searched words and phrases highlighted (not the ones after NOT) */
+const hl=(t,ws)=>{if(!ws||!ws.length)return esc(t);
+ const re=new RegExp("("+ws.slice().sort((a,b)=>b.length-a.length).map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|")+")","giu");
+ return t.split(re).map((x,i)=>i%2?`<mark>${esc(x)}</mark>`:esc(x)).join("")};
 function drawPosts(){
  if(tab!="post")return;
  const cb=(k,v,on,l)=>`<label><input type="checkbox" data-${k}="${esc(v)}" ${on[v]===false?"":"checked"}> ${l}</label> `;
@@ -156,7 +160,7 @@ function listPosts(){
  const ps=POSTS.filter(p=>pgOn[p.group]!==false&&pcOn[p.source]!==false&&(!f||f(p.text.toLowerCase()))).sort((a,b)=>a.posted_utc<b.posted_utc?1:-1);
  $("#plist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${ps.length} of ${POSTS.length} posts</p>`+
   (ps.length?ps.map(p=>`<div class="row"><span class="mut">${esc(p.source_name)} · ${esc(PG[p.group]||p.group)} · ${esc(p.posted_utc.slice(11,16))} UTC</span>`+
-   `<p style="white-space:pre-line;overflow-wrap:anywhere;margin:6px 0">${esc(p.text)}</p><div style="overflow-wrap:anywhere">${p.links.map(lk).join("<br>")}${p.links.length?"<br>":""}`+
+   `<p style="white-space:pre-line;overflow-wrap:anywhere;margin:6px 0">${hl(p.text,f&&f.terms)}</p><div style="overflow-wrap:anywhere">${p.links.map(lk).join("<br>")}${p.links.length?"<br>":""}`+
    `<a href="${esc(p.link)}" target="_blank" rel="noopener">Open original post</a></div></div>`).join(""):`<p class="mut">No posts for this day with these filters.</p>`)}
 /* Event popup (GeoConfirmed, WarSpotting, Telegram, war-fire model): fields copied as each source gives them; media are only linked, never embedded */
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
