@@ -8,13 +8,13 @@ ALL daily data updates live in this one file.
 
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
 rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
-need nothing else. "geoconfirmed" and "warspotting" save geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
+need nothing else. "geoconfirmed", "warspotting" and "telegram_channel" save geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
 never overwrites good data.
 """
-import argparse, collections, csv, datetime as dt, gzip, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -120,6 +120,21 @@ SOURCES = {
         # "lookback_days" days in full, plus the 100 most recently added (any date), merged by ID.
         "lookback_days": 7,
         "color": "#E00000",
+    },
+    "lost_warinua": {
+        "enabled": True,
+        "kind": "telegram_channel",
+        "name": "lost_warinua (Telegram)",
+        "url": "https://t.me/s/lost_warinua",
+        "channel": "lost_warinua",
+        # Read from the channel's public web preview (no login), newest page first, pausing between pages.
+        # Each run re-reads posts published in the last "lookback_days" days; posts are merged by post number.
+        "lookback_days": 3,
+        "max_pages": 30,
+        "category": "Telegram post",
+        # Side as the post's text states it (first match wins); otherwise "Side not stated" in grey.
+        "side_rules": [{"regex": "ВСУ", "side": "Claimed loss: Ukraine (ВСУ)", "color": "#0051CA"},
+                       {"regex": "российск", "side": "Claimed loss: Russia", "color": "#E00000"}],
     },
     # "another_source": { ...copy a block above and change it... },
 }
@@ -449,35 +464,109 @@ def run_warspotting(sid, cfg, args, day, now, data):
     if args.inspect:
         print({d: len(v) for d, v in sorted(by_day.items())})
         return print("Without coordinates:", sum(1 for x in losses.values() if not x.get("geo")), "of", len(losses))
-    filename = KIND_FILENAMES[cfg["kind"]]
-    for d in sorted(set(by_day) | set(full_days)):
-        new = by_day.get(d, {})
-        old_meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {})
-        if d in full_days:   # re-read in full: replaces what was saved before
-            features, no_geo = {}, set()
-        else:                # only some of this day's losses were fetched: merge into what is saved
-            saved = read_json(data / d / sid / filename, {"features": []})["features"]
-            features, no_geo = {f["properties"]["id"]: f for f in saved}, set(old_meta.get("no_coordinates_ids", []))
-        for i, x in new.items():
+    found = collections.defaultdict(dict)
+    for d, day_losses in by_day.items():
+        for i, x in day_losses.items():
             if not x.get("geo"):
-                no_geo.add(i)
+                found[d][i] = None
                 continue
             lat, lon = (float(v) for v in x["geo"].split(","))
-            features[i] = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
+            found[d][i] = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
                 "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": i, "date": d,
                     "link": cfg["loss_link"].format(id=i), "category": x.get("type") or "", "side": f"Lost by {x.get('lost_by')}",
                     "color": cfg["color"], "description": " · ".join(v for v in [x.get("model"), x.get("status"),
                         x.get("nearest_location") and f"near {x['nearest_location']}", x.get("tags") and f"tags: {x['tags']}"] if v),
                     "orbat": [x["unit"]] if x.get("unit") else []}}
+    save_points_merged(sid, cfg, args, data, now, found, set(full_days), cfg["day"].format(date="<date>", page=1))
+
+
+def save_points_merged(sid, cfg, args, data, now, found, replace_days, endpoint):
+    """found = {date: {id: map point, or None if it has no coordinates}}. Days in replace_days were re-read in
+    full and replace what was saved; any other day is merged into what is already saved, matched by ID, so an
+    item fetched twice or already saved is never duplicated. Items without coordinates are left off the map;
+    their IDs are listed in meta.json."""
+    filename = KIND_FILENAMES[cfg["kind"]]
+    for d in sorted(set(found) | set(replace_days)):
+        old_meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {})
+        if d in replace_days:
+            features, no_geo = {}, set()
+        else:
+            saved = read_json(data / d / sid / filename, {"features": []})["features"]
+            features, no_geo = {f["properties"]["id"]: f for f in saved}, set(old_meta.get("no_coordinates_ids", []))
+        for i, f in found.get(d, {}).items():
+            if f is None:
+                no_geo.add(i)
+                features.pop(i, None)
+            else:
+                features[i] = f
+                no_geo.discard(i)
         if not features and not no_geo:
             continue
-        entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "endpoint": cfg["day"].format(date=d, page=1),
+        entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "endpoint": endpoint,
                  "events": len(features), "no_coordinates": len(no_geo), "no_coordinates_ids": sorted(no_geo)}
         if features:
             put_in_place(args, data, d, sid, filename, list(features.values()))
             entry["files"] = [f"{sid}/{filename}"]
         save_meta(data, d, sid, entry)
         print(f"[{sid}] {d}: {len(features)} on map, {len(no_geo)} without coordinates (left off)")
+
+
+COORDS = r"(-?\d{1,2}\.\d{2,})\s*,\s*(-?\d{1,3}\.\d{2,})"
+
+
+def telegram_posts(page, channel):
+    """(post number, publish time, message HTML) for each post on a t.me/s/<channel> page."""
+    for b in re.split(r'(?=<div class="tgme_widget_message_wrap)', page)[1:]:
+        m = re.search(rf'data-post="{channel}/(\d+)"', b)
+        t = re.search(r'<time datetime="([^"]+)"', b)
+        x = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', b, re.S)
+        if m and t and x:
+            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1)
+
+
+def run_telegram(sid, cfg, args, day, now, data):
+    """A public Telegram channel's posts, as map points filed under the date written on the post's first line
+    (or the day it was posted, if there is none). Takes the coordinates, the text in its original language,
+    every link in the post (hyperlinked words such as "Источник" and plain links), and a link to the post."""
+    ch, cutoff, url = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"]), cfg["url"]
+    found, n_posts, no_date = collections.defaultdict(dict), 0, 0
+    try:
+        for _ in range(cfg["max_pages"]):
+            posts = list(telegram_posts(fetch(url, "text/html").decode("utf-8"), ch))
+            time.sleep(2)
+            for pid, when, body in posts:
+                if when < cutoff:
+                    continue
+                n_posts += 1
+                links = list(dict.fromkeys(h for h in (html.unescape(html.unescape(x)) for x in re.findall(r'href="([^"]+)"', body)) if h.startswith("http")))
+                lines = [l for l in (html.unescape(re.sub(r"<[^>]+>", "", x)).strip() for x in re.split(r"<br\s*/?>", body)) if l]
+                m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
+                try:
+                    d, note = dt.date(int(m.group(3)) % 100 + 2000, int(m.group(2)), int(m.group(1))).isoformat(), None
+                    lines = lines[1:]
+                except (AttributeError, TypeError, ValueError):
+                    d, note = when.date().isoformat(), "no date in post; day it was posted"
+                    no_date += 1
+                c = re.search(COORDS, " ".join(lines))
+                text = "\n".join(l for l in lines if not re.fullmatch(COORDS, l.strip("() ")) and not l.startswith("http")
+                                 and not re.match(r"(Источник|Джерело|Source)\b", l, re.I))
+                rule = next((r for r in cfg["side_rules"] if re.search(r["regex"], text)), {"side": "Side not stated", "color": "#666666"})
+                found[d][pid] = c and {"type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [round(float(c.group(2)), 6), round(float(c.group(1)), 6)]},
+                    "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": pid, "date": d,
+                        "date_note": note, "posted_utc": when.isoformat(), "link": f"https://t.me/{ch}/{pid}",
+                        "category": cfg["category"], "side": rule["side"], "color": rule["color"], "description": text,
+                        "orbat": [], "sources": links}}
+            if not posts or min(w for _, w, _ in posts) < cutoff:
+                break
+            url = f"{cfg['url']}?before={min(p for p, _, _ in posts)}"
+    except Exception as e:
+        raise SourceError(f"could not read {url}: {e}")
+    if args.inspect:
+        return print(f"{n_posts} posts since {cutoff:%Y-%m-%d %H:%M}; {no_date} without a date line;",
+                     {d: f"{sum(1 for f in v.values() if f)} with / {sum(1 for f in v.values() if not f)} without coordinates" for d, v in sorted(found.items())})
+    save_points_merged(sid, cfg, args, data, now, found, set(), cfg["url"])
+    print(f"[{sid}] read {n_posts} posts published since {cutoff:%Y-%m-%d %H:%M} UTC; {no_date} had no date line")
 
 
 def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
@@ -520,11 +609,12 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
 
 
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
-         "warspotting": run_warspotting}   # add new kinds of source here
+         "warspotting": run_warspotting, "telegram_channel": run_telegram}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
-                  "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson"}
+                  "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
+                  "telegram_channel": "points/events.geojson"}
 
 
 def save_meta(data, day, sid, entry):
