@@ -9,7 +9,8 @@ ALL daily data updates live in this one file.
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
 rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
 need nothing else. "geoconfirmed", "warspotting" and "telegram_channel" save geolocated events as map points;
-"war_fires" saves The Economist's war-fire model detections as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
+"war_fires" saves The Economist's war-fire model detections as map points; "telegram_posts" saves a channel's
+text posts for the Posts tab (give it a "group" from POST_GROUPS). Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
@@ -41,6 +42,13 @@ CATEGORIES = {   # shared by all sources; the map's checkboxes use these
     "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0"},
     "other":     {"label": "Other", "color": "#7f8c8d"},
     "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
+}
+
+POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
+    "official_ua": "Official Ukrainian",
+    "official_ru": "Official Russian",
+    "unofficial_ua": "Unofficial Ukrainian (milbloggers etc.)",
+    "unofficial_ru": "Unofficial Russian (milbloggers etc.)",
 }
 
 SOURCES = {
@@ -149,6 +157,18 @@ SOURCES = {
         "link": "https://www.economist.com/interactive/graphic-detail/ukraine-fires",
         "lookback_days": 14,
         "color": "#FF8C00",
+    },
+    # Posts tab: Telegram channels copied daily (text in original language; photos/videos only linked).
+    # To add one, copy this block, rename it, and change "name", "url", "channel" and "group".
+    "ua_mod": {
+        "enabled": True,
+        "kind": "telegram_posts",
+        "name": "Ministry of Defence of Ukraine",
+        "url": "https://t.me/s/ministry_of_defense_ua",
+        "channel": "ministry_of_defense_ua",
+        "group": "official_ua",
+        "lookback_days": 2,
+        "max_pages": 10,
     },
     # "another_source": { ...copy a block above and change it... },
 }
@@ -522,7 +542,7 @@ def save_points_merged(sid, cfg, args, data, now, found, replace_days, endpoint)
             put_in_place(args, data, d, sid, filename, list(features.values()))
             entry["files"] = [f"{sid}/{filename}"]
         save_meta(data, d, sid, entry)
-        print(f"[{sid}] {d}: {len(features)} on map, {len(no_geo)} without coordinates (left off)")
+        print(f"[{sid}] {d}: {len(features)} saved, {len(no_geo)} without coordinates (left off the map)")
 
 
 def run_war_fires(sid, cfg, args, day, now, data):
@@ -573,44 +593,72 @@ def telegram_posts(page, channel):
             yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1)
 
 
+def telegram_recent(cfg, cutoff):
+    """Posts from a channel's public web preview published after cutoff: newest page first, 2 s between pages."""
+    url = cfg["url"]
+    for _ in range(cfg["max_pages"]):
+        posts = list(telegram_posts(fetch(url, "text/html").decode("utf-8"), cfg["channel"]))
+        time.sleep(2)
+        yield from (p for p in posts if p[1] >= cutoff)
+        if not posts or min(w for _, w, _ in posts) < cutoff:
+            return
+        url = f"{cfg['url']}?before={min(p for p, _, _ in posts)}"
+
+
+def telegram_lines_links(body):
+    """A post's non-empty text lines, and every link in it (hyperlinked words and plain links), in order."""
+    links = list(dict.fromkeys(h for h in (html.unescape(html.unescape(x)) for x in re.findall(r'href="([^"]+)"', body)) if h.startswith("http")))
+    lines = [l for l in (html.unescape(re.sub(r"<[^>]+>", "", x)).strip() for x in re.split(r"<br\s*/?>", body)) if l]
+    return lines, links
+
+
+def run_telegram_posts(sid, cfg, args, day, now, data):
+    """A public Telegram channel's text posts for the Posts tab, filed under the day they were posted (UTC).
+    Merged by post number, so a post read on two runs is saved once."""
+    cutoff, found, n = now - dt.timedelta(days=cfg["lookback_days"]), collections.defaultdict(dict), 0
+    try:
+        for pid, when, body in telegram_recent(cfg, cutoff):
+            lines, links = telegram_lines_links(body)
+            n += 1
+            found[when.date().isoformat()][pid] = {"type": "Feature", "geometry": None, "properties": {
+                "source": sid, "source_name": cfg["name"], "group": cfg["group"], "id": pid, "posted_utc": when.isoformat(),
+                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links}}
+    except Exception as e:
+        raise SourceError(f"could not read {cfg['url']}: {e}")
+    if args.inspect:
+        return print(f"{n} posts since {cutoff:%Y-%m-%d %H:%M}:", {d: len(v) for d, v in sorted(found.items())})
+    save_points_merged(sid, cfg, args, data, now, found, set(), cfg["url"])
+
+
 def run_telegram(sid, cfg, args, day, now, data):
     """A public Telegram channel's posts, as map points filed under the date written on the post's first line
     (or the day it was posted, if there is none). Takes the coordinates, the text in its original language,
     every link in the post (hyperlinked words such as "Источник" and plain links), and a link to the post."""
-    ch, cutoff, url = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"]), cfg["url"]
+    ch, cutoff = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"])
     found, n_posts, no_date = collections.defaultdict(dict), 0, 0
     try:
-        for _ in range(cfg["max_pages"]):
-            posts = list(telegram_posts(fetch(url, "text/html").decode("utf-8"), ch))
-            time.sleep(2)
-            for pid, when, body in posts:
-                if when < cutoff:
-                    continue
-                n_posts += 1
-                links = list(dict.fromkeys(h for h in (html.unescape(html.unescape(x)) for x in re.findall(r'href="([^"]+)"', body)) if h.startswith("http")))
-                lines = [l for l in (html.unescape(re.sub(r"<[^>]+>", "", x)).strip() for x in re.split(r"<br\s*/?>", body)) if l]
-                m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
-                try:
-                    d, note = dt.date(int(m.group(3)) % 100 + 2000, int(m.group(2)), int(m.group(1))).isoformat(), None
-                    lines = lines[1:]
-                except (AttributeError, TypeError, ValueError):
-                    d, note = when.date().isoformat(), "no date in post; day it was posted"
-                    no_date += 1
-                c = re.search(COORDS, " ".join(lines))
-                text = "\n".join(l for l in lines if not re.fullmatch(COORDS, l.strip("() ")) and not l.startswith("http")
-                                 and not re.match(r"(Источник|Джерело|Source)\b", l, re.I))
-                rule = next((r for r in cfg["side_rules"] if re.search(r["regex"], text)), {"side": "Side not stated", "color": "#666666"})
-                found[d][pid] = c and {"type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [round(float(c.group(2)), 6), round(float(c.group(1)), 6)]},
-                    "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": pid, "date": d,
-                        "date_note": note, "posted_utc": when.isoformat(), "link": f"https://t.me/{ch}/{pid}",
-                        "category": cfg["category"], "side": rule["side"], "color": rule["color"], "description": text,
-                        "orbat": [], "sources": links}}
-            if not posts or min(w for _, w, _ in posts) < cutoff:
-                break
-            url = f"{cfg['url']}?before={min(p for p, _, _ in posts)}"
+        for pid, when, body in telegram_recent(cfg, cutoff):
+            n_posts += 1
+            lines, links = telegram_lines_links(body)
+            m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
+            try:
+                d, note = dt.date(int(m.group(3)) % 100 + 2000, int(m.group(2)), int(m.group(1))).isoformat(), None
+                lines = lines[1:]
+            except (AttributeError, TypeError, ValueError):
+                d, note = when.date().isoformat(), "no date in post; day it was posted"
+                no_date += 1
+            c = re.search(COORDS, " ".join(lines))
+            text = "\n".join(l for l in lines if not re.fullmatch(COORDS, l.strip("() ")) and not l.startswith("http")
+                             and not re.match(r"(Источник|Джерело|Source)\b", l, re.I))
+            rule = next((r for r in cfg["side_rules"] if re.search(r["regex"], text)), {"side": "Side not stated", "color": "#666666"})
+            found[d][pid] = c and {"type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [round(float(c.group(2)), 6), round(float(c.group(1)), 6)]},
+                "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": pid, "date": d,
+                    "date_note": note, "posted_utc": when.isoformat(), "link": f"https://t.me/{ch}/{pid}",
+                    "category": cfg["category"], "side": rule["side"], "color": rule["color"], "description": text,
+                    "orbat": [], "sources": links}}
     except Exception as e:
-        raise SourceError(f"could not read {url}: {e}")
+        raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
         return print(f"{n_posts} posts since {cutoff:%Y-%m-%d %H:%M}; {no_date} without a date line;",
                      {d: f"{sum(1 for f in v.values() if f)} with / {sum(1 for f in v.values() if not f)} without coordinates" for d, v in sorted(found.items())})
@@ -658,12 +706,14 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
 
 
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
-         "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires}   # add new kinds of source here
+         "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires,
+         "telegram_posts": run_telegram_posts}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
                   "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
-                  "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson"}
+                  "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson",
+                  "telegram_posts": "posts/posts.geojson"}
 
 
 def save_meta(data, day, sid, entry):
@@ -712,9 +762,10 @@ def main():
 
     if worked and not args.inspect:
         write_json(data / "categories.json", {"categories": CATEGORIES})
-        # the map shows one checkbox per source listed here, even on days a source has nothing
-        write_json(data / "sources.json", {"sources": {k: {"name": v["name"], "url": v["url"]}
-                                                       for k, v in SOURCES.items() if v.get("enabled", True)}})
+        # the map shows one checkbox per source listed here (the Posts tab: those with a "group"), even on empty days
+        write_json(data / "sources.json", {"post_groups": POST_GROUPS, "sources": {
+            k: {"name": v["name"], "url": v["url"], **({"group": v["group"]} if "group" in v else {})}
+            for k, v in SOURCES.items() if v.get("enabled", True)}})
         # A day "has data" once at least one source folder exists under it (a source only gets a
         # folder once its file has been fully moved into place, so a half-finished run never counts).
         dates = sorted(p.name for p in data.iterdir() if p.is_dir() and any(c.is_dir() for c in p.iterdir()))
