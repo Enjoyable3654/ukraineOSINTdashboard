@@ -8,7 +8,8 @@ ALL daily data updates live in this one file.
 
 HOW TO ADD A SOURCE: copy the "deepstate" block in SOURCES below, give it a new name, and change its address and
 rules. Sources that return map polygons ("kind": "occupation" for GeoJSON, "kmz_layers" for dated KMZ files)
-need nothing else. "geoconfirmed", "warspotting" and "telegram_channel" save geolocated events as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
+need nothing else. "geoconfirmed", "warspotting" and "telegram_channel" save geolocated events as map points;
+"war_fires" saves The Economist's war-fire model detections as map points. Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
 Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
@@ -135,6 +136,19 @@ SOURCES = {
         # Side as the post's text states it (first match wins); otherwise "Side not stated" in grey.
         "side_rules": [{"regex": "ВСУ", "side": "Claimed loss: Ukraine (ВСУ)", "color": "#0051CA"},
                        {"regex": "российск", "side": "Claimed loss: Russia", "color": "#E00000"}],
+    },
+    "economist_fires": {
+        "enabled": True,
+        "kind": "war_fires",
+        "name": "The Economist war-fire model",
+        "url": "https://github.com/TheEconomist/the-economist-war-fire-model",
+        # MIT-licensed. One file with every fire classified as war-related since Feb 2022 (~8 MB compressed),
+        # updated about twice a day. The model confirms fires only after watching later days, so recent days
+        # change: each run re-saves the last "lookback_days" days in full.
+        "csv": "https://raw.githubusercontent.com/TheEconomist/the-economist-war-fire-model/master/output-data/ukraine_war_fires.csv",
+        "link": "https://www.economist.com/interactive/graphic-detail/ukraine-fires",
+        "lookback_days": 14,
+        "color": "#FF8C00",
     },
     # "another_source": { ...copy a block above and change it... },
 }
@@ -511,6 +525,41 @@ def save_points_merged(sid, cfg, args, data, now, found, replace_days, endpoint)
         print(f"[{sid}] {d}: {len(features)} on map, {len(no_geo)} without coordinates (left off)")
 
 
+def run_war_fires(sid, cfg, args, day, now, data):
+    """Satellite fire detections that The Economist's model classifies as war-related, as map points per day.
+    Days in the look-back window are replaced in full each run, since the model revises recent days."""
+    end = dt.date.fromisoformat(day)
+    days = {(end - dt.timedelta(n)).isoformat() for n in range(0 if args.date else cfg["lookback_days"], -1, -1)}
+    try:
+        rows = csv.DictReader(io.StringIO(fetch(cfg["csv"]).decode("utf-8")))
+        by_day = collections.defaultdict(list)
+        for r in rows:
+            if r["date"] in days:
+                t = r["ACQ_TIME"].zfill(4)
+                by_day[r["date"]].append({"type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [round(float(r["LONGITUDE"]), 5), round(float(r["LATITUDE"]), 5)]},
+                    "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": len(by_day[r["date"]]),
+                        "date": r["date"], "link": cfg["link"], "category": "Fire classified as war-related (model estimate)",
+                        "side": "Not attributed", "color": cfg["color"], "radius": 3, "orbat": [],
+                        "description": f"Satellite heat detection at {t[:2]}:{t[2:]} UTC"
+                            + (", in an area of abnormal fire activity." if r["war_fire_restrictive"] == "1"
+                               else ", in an area days after abnormal fire activity.")
+                            + (" Urban area." if r["in_urban_area"] == "TRUE" else "")}})
+    except Exception as e:
+        raise SourceError(f"could not read {cfg['csv']}: {e}")
+    if args.inspect:
+        return print({d: len(by_day.get(d, [])) for d in sorted(days)})
+    filename = KIND_FILENAMES[cfg["kind"]]
+    for d in sorted(days):
+        f = by_day.get(d, [])
+        entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "endpoint": cfg["csv"], "events": len(f)}
+        if f:
+            put_in_place(args, data, d, sid, filename, f)
+            entry["files"] = [f"{sid}/{filename}"]
+        save_meta(data, d, sid, entry)
+        print(f"[{sid}] {d}: {len(f)} fires")
+
+
 COORDS = r"(-?\d{1,2}\.\d{2,})\s*,\s*(-?\d{1,3}\.\d{2,})"
 
 
@@ -609,12 +658,12 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
 
 
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
-         "warspotting": run_warspotting, "telegram_channel": run_telegram}   # add new kinds of source here
+         "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
                   "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
-                  "telegram_channel": "points/events.geojson"}
+                  "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson"}
 
 
 def save_meta(data, day, sid, entry):
