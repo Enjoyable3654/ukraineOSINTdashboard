@@ -43,6 +43,10 @@ h2{font:600 22px Georgia,serif;margin:0 0 2px}
 .cl{margin:6px 0 0;padding-left:16px;font-size:13px;color:var(--mut)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 .sum{margin-top:12px}
+/* Dark mode: darken only the OSM map images (areas and dots keep their colours); nothing extra is requested from OSM */
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.9)}}
+:root[data-theme="dark"] .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.9)}
+.leaflet-container{background:var(--sea)}
 </style></head><body>
 <div class="wrap">
 <aside>
