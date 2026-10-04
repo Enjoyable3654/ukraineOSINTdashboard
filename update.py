@@ -207,12 +207,11 @@ SOURCES = {
         "kind": "llm_summary",
         "name": "Daily summary (Gemini)",
         "url": "https://ai.google.dev/gemini-api",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",   # gemini-2.5-flash is closed to new users (Google, 2026-10)
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        # Usage limits: one request per day; input capped at this many characters; output capped and the
-        # model's extra "thinking" step switched off (not needed for a summary, and it counts as usage).
+        # Usage limits: one request per day; input capped at this many characters; output capped.
         "max_input_chars": 300000,
-        "generation": {"maxOutputTokens": 1500, "thinkingConfig": {"thinkingBudget": 0}},
+        "generation": {"maxOutputTokens": 4000},
         "instructions": (
             "You are summarising one day of open-source reporting on the Russia-Ukraine war for a public dashboard. "
             "Write in English, about 300-500 words, in short sections: Front line, Strikes and losses, Official statements. "
