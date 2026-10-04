@@ -43,7 +43,8 @@ CATEGORIES = {   # shared by all sources; the map's checkboxes use these
     "other":     {"label": "Other", "color": "#7f8c8d"},
     "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
     "gained":    {"label": "Newly Russian-occupied", "color": "#7a0000"},
-    "lost":      {"label": "No longer Russian-occupied", "color": "#2a7de1"},
+    "gained_contested": {"label": "Newly contested", "color": "#b03a3a"},
+    "lost":      {"label": "Less Russian-held (occupied or contested area lost)", "color": "#2a7de1"},
 }
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
@@ -336,7 +337,14 @@ def read_json(path, default):
 
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), "utf-8")
+    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    for i in range(5):   # on Windows, antivirus or file sync can briefly lock a file that was just written
+        try:
+            return path.write_text(text, "utf-8")
+        except OSError:
+            if i == 4:
+                raise
+            time.sleep(0.5)
 
 
 def run_occupation(sid, cfg, args, day, now, data):
@@ -402,40 +410,53 @@ def occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, endpo
 
 
 def compute_changes(sid, cfg, args, data, days):
-    """For each given day, where this source's Russian-occupied area grew ("gained") or shrank ("lost") compared
-    with 1, 7 and 30 days earlier. Saved as polygons/change_<period>.geojson and listed in that day's meta.json.
-    Slivers thinner than CHANGE_MIN_WIDTH_DEGREES are dropped (they come from simplification, not real change)."""
+    """For each given day, how this source's map changed compared with 1, 7 and 30 days earlier. Each spot is
+    Ukrainian, contested or occupied: "gained" = became occupied; "gained_contested" = Ukrainian became contested;
+    "lost" = any step down (occupied->contested/Ukrainian, contested->Ukrainian), merged where touching.
+    Saved as polygons/change_<period>.geojson; area statistics go in meta.json under "change_stats", both for
+    occupied area only and for occupied-or-contested area. Slivers thinner than CHANGE_MIN_WIDTH_DEGREES are
+    dropped (they come from the daily shapes being simplified slightly differently, not real change)."""
     if not HAVE_SHAPELY:
         return print(f"[{sid}] change layers skipped: shapely is not installed")
     fn, eps, cache = KIND_FILENAMES[cfg["kind"]], CHANGE_MIN_WIDTH_DEGREES, {}
+    empty = shape({"type": "Polygon", "coordinates": []})
 
-    def russia(d):
+    def areas(d):   # (occupied, contested) shapes of day d, or None if the day has no saved map
         if d not in cache:
-            f = [x for x in read_json(data / d / sid / fn, {"features": []})["features"] if x["properties"]["category"] == "russia"]
-            cache[d] = shape(f[0]["geometry"]).buffer(0) if f else None
+            f = read_json(data / d / sid / fn, None)
+            g = {x["properties"]["category"]: shape(x["geometry"]).buffer(0) for x in f["features"]} if f else None
+            cache[d] = (g.get("russia", empty), g.get("contested", empty)) if g and "russia" in g else None
         return cache[d]
 
+    clean = lambda g: g.buffer(-eps, join_style="mitre").buffer(eps, join_style="mitre")
+    km2 = lambda g: 0 if g.is_empty else round(polygons_area_km2((lambda m: m["coordinates"] if m["type"] == "MultiPolygon"
+                                                                   else [m["coordinates"]])(mapping(g))), 1)
     for d in days:
         meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid)
-        if not meta or russia(d) is None:
+        if not meta or areas(d) is None:
             continue
-        meta["files"] = [f for f in meta.get("files", []) if "/change_" not in f]
+        meta["files"], meta["change_stats"] = [f for f in meta.get("files", []) if "/change_" not in f], {}
+        rn, cn = areas(d)
         for period, n in CHANGE_PERIODS.items():
             then = (dt.date.fromisoformat(d) - dt.timedelta(n)).isoformat()
-            if russia(then) is None:
+            if areas(then) is None:
                 continue
+            rt, ct = areas(then)
+            hn, ht = rn.union(cn), rt.union(ct)   # held = occupied or contested
+            shapes = {"gained": clean(rn.difference(rt)), "gained_contested": clean(cn.difference(ht)),
+                      "lost": clean(rt.difference(rn).union(ct.difference(hn)))}
             feats = []
-            for cat, g in (("gained", russia(d).difference(russia(then))), ("lost", russia(then).difference(russia(d)))):
-                g = g.buffer(-eps, join_style="mitre").buffer(eps, join_style="mitre")
+            for cat, g in shapes.items():
                 if g.is_empty:
                     continue
                 m = mapping(g)
-                geom = {"type": m["type"], "coordinates": xy(m["coordinates"])}
-                area = polygons_area_km2(geom["coordinates"] if geom["type"] == "MultiPolygon" else [geom["coordinates"]])
-                feats.append({"type": "Feature", "geometry": geom, "properties": {
+                feats.append({"type": "Feature", "geometry": {"type": m["type"], "coordinates": xy(m["coordinates"])}, "properties": {
                     "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "category": cat,
                     "category_label": CATEGORIES[cat]["label"], "period": period, "compared_with": then,
-                    "snapshot_time": d, "area_km2_approx": round(area, 1)}})
+                    "snapshot_time": d, "area_km2_approx": km2(g)}})
+            meta["change_stats"][period] = {"compared_with": then,
+                "occupied": {"gained": km2(shapes["gained"]), "lost": km2(clean(rt.difference(rn)))},
+                "occupied_or_contested": {"gained": km2(clean(hn.difference(ht))), "lost": km2(clean(ht.difference(hn)))}}
             name = f"polygons/change_{period}.geojson"
             put_in_place(args, data, d, sid, name, feats)
             meta["files"].append(f"{sid}/{name}")

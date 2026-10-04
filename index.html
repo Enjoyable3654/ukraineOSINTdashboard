@@ -52,13 +52,13 @@ h2{font:600 22px Georgia,serif;margin:0 0 2px}
 <button id="theme" class="btn" style="position:fixed;top:8px;right:8px;z-index:1100" title="Switch between following your device, light and dark"></button>
 <div class="wrap">
 <aside>
- <div class="card"><h1>Daily archive</h1><p class="mut" style="margin:2px 0 10px">Pick a day to reload the whole dashboard as it was archived.</p><div id="cal"></div></div>
+ <div class="card"><h1>Daily archive</h1><p class="mut" style="margin:2px 0 10px">Pick a day to reload the whole dashboard as it was archived.</p><div id="cal"></div><div class="bar" style="margin:8px 0 0"><button class="btn" data-step="-1">‹ Previous day</button><button class="btn" data-step="1">Next day ›</button></div></div>
  <div class="card sum"><b>Day summary</b><p id="sum" class="mut" style="margin:6px 0 0"></p></div>
 </aside>
 <main>
  <h2 id="date"></h2><div class="mut" id="meta"></div>
  <div class="tabs" role="tablist"><button data-t="map">Map</button><button data-t="feat">Features</button><button data-t="post">Posts</button></div>
- <div id="mapPane"><div class="bar"><label class="btn">Add GeoTIFF<input type="file" id="gt" accept=".tif,.tiff,.geotiff" multiple hidden></label><span class="mut" id="gs">Files are read in your browser and never uploaded. You can also drop them on the map.</span></div><div id="lyrs"></div><div class="bar"><label class="mut">Change in Russian-occupied area compared with <select id="cp"><option value="1d">the previous day</option><option value="7d">7 days before</option><option value="30d">30 days before</option><option value="">(off)</option></select></label></div><div class="bar"><span class="mut" id="os"></span><span id="oc"></span></div><p id="tn" class="note" hidden></p><div id="map"></div></div>
+ <div id="mapPane"><div class="bar"><label class="btn">Add GeoTIFF<input type="file" id="gt" accept=".tif,.tiff,.geotiff" multiple hidden></label><span class="mut" id="gs">Files are read in your browser and never uploaded. You can also drop them on the map.</span></div><div id="lyrs"></div><div class="bar"><label class="mut">Change in Russian-occupied area compared with <select id="cp"><option value="1d">the previous day</option><option value="7d">7 days before</option><option value="30d">30 days before</option><option value="">(off)</option></select></label> <label class="mut"><input type="checkbox" id="cc" checked> Include contested areas in the numbers</label></div><div class="bar mut" id="cst"></div><div class="bar"><span class="mut" id="os"></span><span id="oc"></span></div><p id="tn" class="note" hidden></p><div id="map"></div></div>
  <div id="view"></div>
 </main></div>
 <p class="mut" style="text-align:center;margin:0 0 16px">Map data from OpenStreetMap. <a href="https://www.openstreetmap.org/fixthemap">Report a map issue</a></p>
@@ -99,27 +99,28 @@ function render(){
  if(occFor!==sel){occFor=sel;loadOcc()}
  $("#view").innerHTML=h;drawPosts()}
 document.addEventListener("click",e=>{
- const b=e.target.closest("[data-m],[data-d],[data-t]");if(!b)return;
+ const b=e.target.closest("[data-m],[data-d],[data-t],[data-step]");if(!b)return;
  if(b.dataset.m){const d=new Date(Date.UTC(view[0],view[1]+ +b.dataset.m,1));view=[d.getUTCFullYear(),d.getUTCMonth()]}
  else if(b.dataset.d)sel=b.dataset.d;
  else if(b.dataset.t)tab=b.dataset.t;
+ else{const k=key(new Date(sel+"T00:00:00Z").getTime()+b.dataset.step*864e5);if(!A[k])return;sel=k;const d=new Date(k+"T00:00:00Z");view=[d.getUTCFullYear(),d.getUTCMonth()]}
  render()});
-document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}
+document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}if(e.target.id=="cc"){incC=e.target.checked;drawOcc()}
  if(d.pg){pgOn[d.pg]=e.target.checked;drawPosts()}if(d.pc){pcOn[d.pc]=e.target.checked;drawPosts()}});
 document.addEventListener("input",e=>{if(e.target.id=="pq"){pq=e.target.value;listPosts()}});
 
 /* Occupation polygons from data/<date>/<source>/polygons/occupation.geojson, built by the daily job */
 map.createPane("occ").style.zIndex=450;
 const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let OCC=null,CATS={},SRCS={},PG={},POSTS=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",occP="1d";
+let OCC=null,CATS={},SRCS={},PG={},POSTS=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",occP="1d",META={},incC=true;
 /* data files change daily: always ask GitHub whether there is a newer copy (fast "not modified" if not) */
 const get=u=>fetch(u,{cache:"no-cache"});
 async function loadOcc(){
- const day=sel;OCC=null;POSTS=[];
+ const day=sel;OCC=null;POSTS=[];META={};
  try{
   if(!Object.keys(CATS).length)CATS=(await(await get("data/categories.json")).json()).categories;
   if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;PG=j.post_groups||{}}
-  const meta=await(await get(`data/${day}/meta.json`)).json();
+  const meta=await(await get(`data/${day}/meta.json`)).json();META=meta.sources||{};
   /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
   const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/\/polygons\/(occupation|change_\w+)\.geojson$/.test(f)||f.endsWith("/points/events.geojson")||f.endsWith("/points/fires.geojson"));
   const pf=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/posts/posts.geojson"));
@@ -138,6 +139,11 @@ function drawOcc(){
  const fs=OCC?OCC.features:[],has=new Set(fs.map(f=>f.properties.source));
  /* every source always gets a checkbox, even on days it has nothing */
  oc.innerHTML=Object.entries(SRCS).filter(([s,p])=>!p.group).map(([s,p])=>`<label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>${has.has(s)?"":' <span class="mut">(nothing this day)</span>'}</label> `).join("");
+ /* change numbers for each ticked area source, for the selected comparison */
+ const n=v=>v.toLocaleString("en",{maximumFractionDigits:1});
+ $("#cst").innerHTML=occP?Object.entries(META).filter(([s,m])=>m.change_stats&&occOn[s]!==false).map(([s,m])=>{const c=m.change_stats[occP];if(!c)return`${esc(SRCS[s]?.name||s)}: no map ${occP} earlier to compare with`;
+  const v=c[incC?"occupied_or_contested":"occupied"],net=v.gained-v.lost;
+  return`<b>${esc(SRCS[s]?.name||s)}</b> vs ${esc(c.compared_with)}: Russian-${incC?"held (occupied or contested)":"occupied"} area +${n(v.gained)} km² gained, −${n(v.lost)} km² lost, net ${net>=0?"+":"−"}${n(Math.abs(net))} km²`}).join("<br>"):"";
  if(!OCC){st.textContent="No map data for this day yet. Sources: ";return}
  const pt=f=>f.geometry.type=="Point",per=f=>!f.properties.period||f.properties.period===occP,
   cs=[...new Set(fs.filter(f=>!pt(f)&&per(f)).map(f=>f.properties.category))],ct=c=>CATS[c]||{};
