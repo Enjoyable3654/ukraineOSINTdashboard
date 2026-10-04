@@ -209,7 +209,10 @@ SOURCES = {
         "url": "https://ai.google.dev/gemini-api",
         "model": "gemini-2.5-flash",
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        # Usage limits: one request per day; input capped at this many characters; output capped and the
+        # model's extra "thinking" step switched off (not needed for a summary, and it counts as usage).
         "max_input_chars": 300000,
+        "generation": {"maxOutputTokens": 1500, "thinkingConfig": {"thinkingBudget": 0}},
         "instructions": (
             "You are summarising one day of open-source reporting on the Russia-Ukraine war for a public dashboard. "
             "Write in English, about 300-500 words, in short sections: Front line, Strikes and losses, Official statements. "
@@ -837,7 +840,8 @@ def run_llm_summary(sid, cfg, args, day, now, data):
             raise RuntimeError(f"nothing saved for {d} to summarise")
         req = urllib.request.Request(cfg["endpoint"].format(model=cfg["model"]), method="POST",
             headers={"Content-Type": "application/json", "x-goog-api-key": key, "User-Agent": USER_AGENT},
-            data=json.dumps({"contents": [{"parts": [{"text": f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}"}]}]}).encode())
+            data=json.dumps({"contents": [{"parts": [{"text": f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}"}]}],
+                             "generationConfig": cfg["generation"]}).encode())
         with urllib.request.urlopen(req, timeout=300) as r:
             out = json.loads(r.read().decode("utf-8"))
         text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
