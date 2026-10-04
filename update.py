@@ -42,7 +42,13 @@ CATEGORIES = {   # shared by all sources; the map's checkboxes use these
     "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0"},
     "other":     {"label": "Other", "color": "#7f8c8d"},
     "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
+    "gained":    {"label": "Newly Russian-occupied", "color": "#7a0000"},
+    "lost":      {"label": "No longer Russian-occupied", "color": "#2a7de1"},
 }
+
+# Change layers: each area source's Russian-occupied area compared with this many days earlier.
+CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
+CHANGE_MIN_WIDTH_DEGREES = 0.0003   # about 30 m: thinner slivers come from day-to-day simplification, not real change
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
     "official_ua": "Official Ukrainian",
@@ -57,7 +63,13 @@ SOURCES = {
         "kind": "occupation",
         "name": "DeepStateMap",
         "url": "https://deepstatemap.live/en",
-        "endpoint": "https://deepstatemap.live/api/history/last",   # confirmed working from a real inspect run
+        "endpoint": "https://deepstatemap.live/api/history/last",   # latest map; used by --inspect and --from-file
+        # Every past map version (its "id" is its publish time) and each version's shapes. Each day gets the last
+        # version published by the end of that day (UTC). DeepState revises maps afterwards, so each run re-fetches
+        # the last "lookback_days" days.
+        "history": "https://deepstatemap.live/api/history/public",
+        "snapshot": "https://deepstatemap.live/api/history/{id}/geojson",
+        "lookback_days": 30,
         "name_separator": "///",      # DeepState names look like "<Ukrainian> /// <English> /// <stable code>"
         "name_part": 1,               # keep the English part (for display: popups, source_labels)
         "classify_part": 2,           # match rules against the stable code instead (does not change with wording)
@@ -75,17 +87,18 @@ SOURCES = {
             {"category": "contested", "regex": "status\\.unknown"},
             {"category": "other",     "regex": "territories\\."},
         ],
+        "leave_off_map": ["ukraine"],   # user's decision (2026-10-03); still listed by name in meta.json
     },
     "ukrdaily": {
         "enabled": True,
         "kind": "kmz_layers",
         "name": "UkrDailyUpdate",
         "url": "https://map.ukrdailyupdate.com/",
-        # One KMZ file per layer per date. Files appear about 2 days after their date, so each run checks the
-        # last "lookback_days" days and saves every date not yet saved, under that date's own folder.
+        # One KMZ file per layer per date. Files appear days after their date and may be revised, so each run
+        # re-fetches the last "lookback_days" days, each under that date's own folder.
         "endpoint": "https://map.ukrdailyupdate.com/kmz/{date}/{layer}.kmz",
         "layers": ["Ukrainian", "Russians", "Contested Areas"],
-        "lookback_days": 7,
+        "lookback_days": 30,
         "simplify_degrees": 0.0001,
         "cleanup_buffer_degrees": 0.00001,
         # Matched against "<layer>|<shape colour>" (colour taken from each shape's KMZ style).
@@ -98,7 +111,7 @@ SOURCES = {
             {"category": "contested",  "regex": "^Contested Areas\\|FFD600$"},
             {"category": "background", "regex": "^Ukrainian\\|1A237E$|^Russians\\|(A52714|880E4F|C2185B)$"},
         ],
-        "leave_off_map": ["background"],
+        "leave_off_map": ["background", "ukraine"],
     },
     "geoconfirmed": {
         "enabled": True,
@@ -327,18 +340,46 @@ def write_json(path, obj):
 
 
 def run_occupation(sid, cfg, args, day, now, data):
-    """A source that returns map polygons: sort into categories, merge, save polygons/occupation.geojson."""
+    """DeepState-style source: for each day of the look-back window, the last map version published by the end of
+    that day (UTC) is sorted into categories, merged and saved; then the change layers are rebuilt."""
+    if args.inspect or args.from_file:
+        try:
+            payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else json.loads(fetch(cfg["endpoint"], "application/json"))
+        except Exception as e:
+            raise SourceError(f"could not get data from {args.from_file or cfg['endpoint']}: {e}")
+        snap = payload.get("datetime") if isinstance(payload, dict) else None
+        return occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, args.from_file or cfg["endpoint"])
     try:
-        payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else json.loads(fetch(cfg["endpoint"], "application/json"))
+        versions = sorted(int(v["id"]) for v in json.loads(fetch(cfg["history"], "application/json")))
     except Exception as e:
-        raise SourceError(f"could not get data from {args.from_file or cfg['endpoint']}: {e}")
+        raise SourceError(f"could not get the list of map versions from {cfg['history']}: {e}")
+    end, days, last, payload = dt.date.fromisoformat(day), [], None, None
+    for n in range(0 if args.date else cfg["lookback_days"], -1, -1):
+        d = end - dt.timedelta(n)
+        cutoff = dt.datetime.combine(d + dt.timedelta(1), dt.time(), dt.timezone.utc).timestamp()
+        vid = max((v for v in versions if v < cutoff), default=None)
+        if vid is None:
+            continue
+        url = cfg["snapshot"].format(id=vid)
+        if vid != last:   # consecutive days often share a version: download it once
+            time.sleep(1)
+            try:
+                payload, last = json.loads(fetch(url, "application/json")), vid
+            except Exception as e:
+                raise SourceError(f"could not get {url}: {e}")
+        snap = dt.datetime.fromtimestamp(vid, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        occupation_from_payload(sid, cfg, args, d.isoformat(), now, data, payload, snap, url)
+        days.append(d.isoformat())
+    compute_changes(sid, cfg, args, data, days)
+
+
+def occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, endpoint):
+    """Sort one map version's polygons into categories, merge them, and save them for one day."""
     fc = find_feature_collection(payload)
     if not fc:
         raise SourceError("no GeoJSON FeatureCollection found in the response. Run --inspect and send the output to Claude.")
     if args.inspect:
         return print_inspect(payload, fc, cfg)
-
-    snap = payload.get("datetime") if isinstance(payload, dict) and isinstance(payload.get("datetime"), str) else None
     polys, labels, skipped, n_feat = collections.defaultdict(list), collections.defaultdict(set), collections.Counter(), collections.Counter()
     for f in fc["features"]:
         g, props = f.get("geometry") or {}, f.get("properties") or {}
@@ -354,10 +395,52 @@ def run_occupation(sid, cfg, args, day, now, data):
     if not polys:
         raise SourceError("the response contained no polygons; nothing saved (existing data left untouched).")
     save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, {
-        "snapshot_time": snap, "endpoint": args.from_file or cfg["endpoint"], "skipped_non_polygon": dict(skipped)})
+        "snapshot_time": snap, "endpoint": endpoint, "skipped_non_polygon": dict(skipped)})
     if args.keep_raw:
         with gzip.open(data / day / sid / "raw.json.gz", "wt", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
+
+
+def compute_changes(sid, cfg, args, data, days):
+    """For each given day, where this source's Russian-occupied area grew ("gained") or shrank ("lost") compared
+    with 1, 7 and 30 days earlier. Saved as polygons/change_<period>.geojson and listed in that day's meta.json.
+    Slivers thinner than CHANGE_MIN_WIDTH_DEGREES are dropped (they come from simplification, not real change)."""
+    if not HAVE_SHAPELY:
+        return print(f"[{sid}] change layers skipped: shapely is not installed")
+    fn, eps, cache = KIND_FILENAMES[cfg["kind"]], CHANGE_MIN_WIDTH_DEGREES, {}
+
+    def russia(d):
+        if d not in cache:
+            f = [x for x in read_json(data / d / sid / fn, {"features": []})["features"] if x["properties"]["category"] == "russia"]
+            cache[d] = shape(f[0]["geometry"]).buffer(0) if f else None
+        return cache[d]
+
+    for d in days:
+        meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid)
+        if not meta or russia(d) is None:
+            continue
+        meta["files"] = [f for f in meta.get("files", []) if "/change_" not in f]
+        for period, n in CHANGE_PERIODS.items():
+            then = (dt.date.fromisoformat(d) - dt.timedelta(n)).isoformat()
+            if russia(then) is None:
+                continue
+            feats = []
+            for cat, g in (("gained", russia(d).difference(russia(then))), ("lost", russia(then).difference(russia(d)))):
+                g = g.buffer(-eps, join_style="mitre").buffer(eps, join_style="mitre")
+                if g.is_empty:
+                    continue
+                m = mapping(g)
+                geom = {"type": m["type"], "coordinates": xy(m["coordinates"])}
+                area = polygons_area_km2(geom["coordinates"] if geom["type"] == "MultiPolygon" else [geom["coordinates"]])
+                feats.append({"type": "Feature", "geometry": geom, "properties": {
+                    "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "category": cat,
+                    "category_label": CATEGORIES[cat]["label"], "period": period, "compared_with": then,
+                    "snapshot_time": d, "area_km2_approx": round(area, 1)}})
+            name = f"polygons/change_{period}.geojson"
+            put_in_place(args, data, d, sid, name, feats)
+            meta["files"].append(f"{sid}/{name}")
+        save_meta(data, d, sid, meta)
+    print(f"[{sid}] change layers rebuilt for {len(days)} days")
 
 
 def kml_shapes(kml):
@@ -373,18 +456,18 @@ def kml_shapes(kml):
 
 
 def run_kmz_layers(sid, cfg, args, day, now, data):
-    """A source that publishes one KMZ (zipped KML) file per layer per date. Each date is saved in its own
-    day folder; dates already saved are skipped unless --date asks for one again."""
+    """A source that publishes one KMZ (zipped KML) file per layer per date. Each date of the look-back window is
+    re-fetched and saved in its own day folder; then the change layers are rebuilt."""
     today = dt.date.fromisoformat(day)
     dates = [day] if args.date else [(today - dt.timedelta(n)).isoformat() for n in range(cfg["lookback_days"] + 1)]
+    saved = []
     for d in dates:
-        if not args.date and not args.inspect and read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {}).get("status") == "ok":
-            continue
         polys, labels, skipped, n_feat = collections.defaultdict(list), collections.defaultdict(set), collections.Counter(), collections.Counter()
         seen = collections.Counter()
         try:
             for layer in cfg["layers"]:
                 url = cfg["endpoint"].format(date=d, layer=urllib.parse.quote(layer))
+                time.sleep(1)
                 z = zipfile.ZipFile(io.BytesIO(fetch(url)))
                 kml = z.read(next(n for n in z.namelist() if n.lower().endswith(".kml")))
                 for name, colour, plist, other in kml_shapes(kml):
@@ -410,7 +493,9 @@ def run_kmz_layers(sid, cfg, args, day, now, data):
             return print("Ignored non-polygon items:", dict(skipped))
         save_polygons(sid, cfg, args, d, now, data, polys, labels, n_feat, {
             "snapshot_time": d, "endpoint": cfg["endpoint"], "skipped_non_polygon": dict(skipped)})
+        saved.append(d)
     print(f"[{sid}] checked {dates[-1]} to {dates[0]}")
+    compute_changes(sid, cfg, args, data, sorted(saved))
 
 
 def put_in_place(args, data, day, sid, filename, features):
@@ -691,8 +776,7 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
         features.append({"type": "Feature", "geometry": geom, "properties": {
             "source": sid, "source_name": cfg["name"], "source_url": cfg["url"],
             "category": cat, "category_label": CATEGORIES.get(cat, {}).get("label", cat),
-            "snapshot_time": extra["snapshot_time"], "fetched_at_utc": now.isoformat(timespec="seconds"),
-            "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
+            "snapshot_time": extra["snapshot_time"], "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
             "area_km2_approx": round(area), "processing": note}})
 
     filename = KIND_FILENAMES[cfg["kind"]]
@@ -742,6 +826,7 @@ def main():
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
     ap.add_argument("--working-dir", default=str(ROOT / "data_working"), help="scratch space; never committed, cleared after each run")
     ap.add_argument("--keep-raw", action="store_true", help="also save the raw response as .json.gz (large)")
+    ap.add_argument("--lookback", type=int, help="override every source's lookback_days (e.g. a one-time back-fill)")
     args = ap.parse_args()
 
     if args.inspect:
@@ -760,7 +845,7 @@ def main():
     args.working_dir_path = Path(args.working_dir)
     failed, worked = [], []
     for sid in ids:
-        cfg = SOURCES[sid]
+        cfg = {**SOURCES[sid], **({"lookback_days": args.lookback} if args.lookback else {})}
         try:
             KINDS[cfg["kind"]](sid, cfg, args, day, now, data)
             worked.append(sid)
