@@ -35,16 +35,20 @@ ROOT = Path(__file__).resolve().parent
 
 USER_AGENT = "ukraine-osint-dashboard/1.0 (+https://github.com/Enjoyable3654/ukraineOSINTdashboard)"
 
-CATEGORIES = {   # shared by all sources; the map's checkboxes use these
-    "ukraine":   {"label": "Ukraine-controlled / recently liberated", "color": "#2a7de1"},
-    "russia":    {"label": "Russian-occupied", "color": "#d64545"},
-    "contested": {"label": "Contested / unknown status", "color": "#444444"},
-    "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0"},
-    "other":     {"label": "Other", "color": "#7f8c8d"},
-    "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444"},
-    "gained":    {"label": "Newly Russian-occupied", "color": "#7a0000"},
-    "gained_contested": {"label": "Newly contested", "color": "#b03a3a"},
-    "lost":      {"label": "Less Russian-held (occupied or contested area lost)", "color": "#2a7de1"},
+CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the map in dark mode / as borders
+    "ukraine":   {"label": "Ukraine-controlled / recently liberated", "color": "#2a7de1", "color_dark": "#5aa9ff"},
+    "russia":    {"label": "Russian-occupied", "color": "#d64545", "color_dark": "#ff6b6b"},
+    "contested": {"label": "Contested / unknown status", "color": "#444444", "color_dark": "#a0a0a0"},
+    "claims":    {"label": "Claimed by a party (unverified)", "color": "#8e5bd0", "color_dark": "#b58cf0"},
+    "other":     {"label": "Other", "color": "#7f8c8d", "color_dark": "#b0bec5"},
+    "unmapped":  {"label": "Unmapped source type (needs a rule)", "color": "#444444", "color_dark": "#a0a0a0"},
+    # change layers
+    "gained":    {"label": "Russian advance: became occupied", "color": "#7a0000", "color_dark": "#ff3b3b"},
+    "lost":      {"label": "Ukrainian advance: became Ukrainian-held", "color": "#123f8c", "color_dark": "#5aa9ff"},
+    "occupied_to_contested": {"label": "Occupied became contested", "color": "#444444", "color_dark": "#a0a0a0",
+                              "outline": "#123f8c", "outline_dark": "#5aa9ff"},
+    "ukrainian_to_contested": {"label": "Ukrainian-held became contested", "color": "#444444", "color_dark": "#a0a0a0",
+                               "outline": "#7a0000", "outline_dark": "#ff3b3b"},
 }
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
@@ -411,11 +415,11 @@ def occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, endpo
 
 def compute_changes(sid, cfg, args, data, days):
     """For each given day, how this source's map changed compared with 1, 7 and 30 days earlier. Each spot is
-    Ukrainian, contested or occupied: "gained" = became occupied; "gained_contested" = Ukrainian became contested;
-    "lost" = any step down (occupied->contested/Ukrainian, contested->Ukrainian), merged where touching.
-    Saved as polygons/change_<period>.geojson; area statistics go in meta.json under "change_stats", both for
-    occupied area only and for occupied-or-contested area. Slivers thinner than CHANGE_MIN_WIDTH_DEGREES are
-    dropped (they come from the daily shapes being simplified slightly differently, not real change)."""
+    Ukrainian-held (U), contested (C) or occupied (R). Drawn: "gained" = became occupied (U->R, C->R);
+    "lost" = became Ukrainian-held (R->U, C->U), merged where touching; "occupied_to_contested" (R->C) and
+    "ukrainian_to_contested" (U->C). Saved as polygons/change_<period>.geojson; the area of each of the six
+    transitions goes in meta.json under "change_stats" so the map can total them either way. Slivers thinner
+    than CHANGE_MIN_WIDTH_DEGREES are dropped (they come from daily simplification, not real change)."""
     if not HAVE_SHAPELY:
         return print(f"[{sid}] change layers skipped: shapely is not installed")
     fn, eps, cache = KIND_FILENAMES[cfg["kind"]], CHANGE_MIN_WIDTH_DEGREES, {}
@@ -443,8 +447,10 @@ def compute_changes(sid, cfg, args, data, days):
                 continue
             rt, ct = areas(then)
             hn, ht = rn.union(cn), rt.union(ct)   # held = occupied or contested
-            shapes = {"gained": clean(rn.difference(rt)), "gained_contested": clean(cn.difference(ht)),
-                      "lost": clean(rt.difference(rn).union(ct.difference(hn)))}
+            t = {"u2r": clean(rn.difference(ht)), "c2r": clean(rn.intersection(ct)), "u2c": clean(cn.difference(ht)),
+                 "r2c": clean(rt.intersection(cn)), "r2u": clean(rt.difference(hn)), "c2u": clean(ct.difference(hn))}
+            shapes = {"gained": clean(rn.difference(rt)), "lost": clean(ht.difference(hn)),
+                      "occupied_to_contested": t["r2c"], "ukrainian_to_contested": t["u2c"]}
             feats = []
             for cat, g in shapes.items():
                 if g.is_empty:
@@ -454,9 +460,7 @@ def compute_changes(sid, cfg, args, data, days):
                     "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "category": cat,
                     "category_label": CATEGORIES[cat]["label"], "period": period, "compared_with": then,
                     "snapshot_time": d, "area_km2_approx": km2(g)}})
-            meta["change_stats"][period] = {"compared_with": then,
-                "occupied": {"gained": km2(shapes["gained"]), "lost": km2(clean(rt.difference(rn)))},
-                "occupied_or_contested": {"gained": km2(clean(hn.difference(ht))), "lost": km2(clean(ht.difference(hn)))}}
+            meta["change_stats"][period] = {"compared_with": then, "km2": {k: km2(g) for k, g in t.items()}}
             name = f"polygons/change_{period}.geojson"
             put_in_place(args, data, d, sid, name, feats)
             meta["files"].append(f"{sid}/{name}")
