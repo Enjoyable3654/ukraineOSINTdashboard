@@ -16,7 +16,7 @@ Nothing is dropped silently: polygons that match no rule are kept as category "u
 are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
 never overwrites good data.
 """
-import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, os, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -199,6 +199,25 @@ SOURCES = {
         "max_pages": 10,
     },
     # "another_source": { ...copy a block above and change it... },
+    # Daily summary: runs last, reads everything saved for the previous day and asks Gemini (Google, free tier) to
+    # summarise it. No fallback by the user's choice (2026-10-04): if it fails, the error is saved and shown instead.
+    # The API key comes from the GEMINI_API_KEY secret; it is never written to any file.
+    "daily_summary": {
+        "enabled": True,
+        "kind": "llm_summary",
+        "name": "Daily summary (Gemini)",
+        "url": "https://ai.google.dev/gemini-api",
+        "model": "gemini-2.5-flash",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        "max_input_chars": 300000,
+        "instructions": (
+            "You are summarising one day of open-source reporting on the Russia-Ukraine war for a public dashboard. "
+            "Write in English, about 300-500 words, in short sections: Front line, Strikes and losses, Official statements. "
+            "Rules: attribute every claim to its source and say which side it comes from; when sources disagree, give each "
+            "version separately and never merge them into one 'truth'; say when something is unverified or only claimed; "
+            "use only the material below, add nothing from memory; do not name private individuals; translate quoted "
+            "Ukrainian or Russian into English. If the material is thin, say so briefly instead of padding."),
+    },
 }
 
 # =====================================================================================================
@@ -786,6 +805,59 @@ def run_telegram(sid, cfg, args, day, now, data):
     print(f"[{sid}] read {n_posts} posts published since {cutoff:%Y-%m-%d %H:%M} UTC; {no_date} had no date line")
 
 
+def run_llm_summary(sid, cfg, args, day, now, data):
+    """Summarise everything saved for one day (default: the day before, which is complete) with Gemini.
+    Saves data/<day>/<source>/text/summary.json, or the error in meta.json if anything fails."""
+    d = day if args.date else (dt.date.fromisoformat(day) - dt.timedelta(1)).isoformat()
+    meta = read_json(data / d / "meta.json", {"sources": {}})["sources"]
+    lines = []
+    for src, m in meta.items():
+        name = SOURCES.get(src, {}).get("name", src)
+        for f in m.get("files", []) if m.get("status") == "ok" else []:
+            for x in read_json(data / d / f, {"features": []})["features"]:
+                p = x["properties"]
+                if "/posts/" in f:
+                    lines.append(f"[{name} | {POST_GROUPS.get(p['group'], p['group'])} | {p['posted_utc'][11:16]} UTC] {p['text']}")
+                elif "/points/events" in f:
+                    lines.append(f"[{name} | event | side: {p.get('side')}] {p.get('category')}: {p.get('description')}")
+        if src.endswith("fires") and m.get("events") is not None:
+            lines.append(f"[{name}] {m['events']} satellite fire detections classified as war-related (model estimate).")
+        c = m.get("change_stats", {}).get("1d")
+        if c and c.get("km2"):
+            k = c["km2"]
+            lines.append(f"[{name} | map change vs {c['compared_with']}, km2] newly occupied {k['u2r'] + k['c2r']} "
+                         f"(from contested {k['c2r']}), newly contested {k['u2c']}, back to Ukrainian-held {k['r2u'] + k['c2u']}, "
+                         f"occupied became contested {k['r2c']}")
+    material = "\n".join(lines)[:cfg["max_input_chars"]]
+    try:
+        key = os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise RuntimeError("no GEMINI_API_KEY secret is set")
+        if not lines:
+            raise RuntimeError(f"nothing saved for {d} to summarise")
+        req = urllib.request.Request(cfg["endpoint"].format(model=cfg["model"]), method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": key, "User-Agent": USER_AGENT},
+            data=json.dumps({"contents": [{"parts": [{"text": f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}"}]}]}).encode())
+        with urllib.request.urlopen(req, timeout=300) as r:
+            out = json.loads(r.read().decode("utf-8"))
+        text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
+        if not text:
+            raise RuntimeError(f"Gemini returned no text ({out['candidates'][0].get('finishReason')})")
+    except Exception as e:
+        msg = getattr(e, "read", None) and e.read().decode("utf-8", "replace")[:300] or str(e)
+        save_meta(data, d, sid, {"status": "error", "error": f"Summary could not be generated: {msg}",
+                                 "at_utc": now.isoformat(timespec="seconds")})
+        raise SourceError(f"{d}: {msg}")
+    fn = KIND_FILENAMES[cfg["kind"]]
+    write_json(args.working_dir_path / d / sid / fn, {"date": d, "text": text, "model": cfg["model"],
+                                                      "generated_utc": now.isoformat(timespec="seconds"), "input_items": len(lines)})
+    (data / d / sid / fn).parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(args.working_dir_path / d / sid / fn), str(data / d / sid / fn))
+    save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "model": cfg["model"],
+                             "input_items": len(lines), "files": [f"{sid}/{fn}"]})
+    print(f"[{sid}] {d}: summary saved ({len(lines)} items in, {len(text.split())} words out)")
+
+
 def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
     """Merge each category's polygons, save data/<day>/<source>/polygons/occupation.geojson, log it in meta.json."""
     hidden = set(cfg.get("leave_off_map", []))
@@ -826,13 +898,13 @@ def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
 
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
          "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires,
-         "telegram_posts": run_telegram_posts}   # add new kinds of source here
+         "telegram_posts": run_telegram_posts, "llm_summary": run_llm_summary}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
                   "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
                   "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson",
-                  "telegram_posts": "posts/posts.geojson"}
+                  "telegram_posts": "posts/posts.geojson", "llm_summary": "text/summary.json"}
 
 
 def save_meta(data, day, sid, entry):

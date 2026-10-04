@@ -31,6 +31,8 @@ jobs:
       - run: pip install shapely
 
       - name: Run updates (all of them live in update.py)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # set in the repo's Settings > Secrets; never stored in a file
         run: |
           if [ "$MODE" = "inspect" ]; then python update.py --inspect "${SRC:-deepstate}"; else python update.py; fi
 

@@ -55,7 +55,7 @@ h2{font:600 22px Georgia,serif;margin:0 0 2px}
 <div class="wrap">
 <aside>
  <div class="card"><h1>Daily archive</h1><p class="mut" style="margin:2px 0 10px">Pick a day to reload the whole dashboard as it was archived.</p><div id="cal"></div><div class="bar" style="margin:8px 0 0"><button class="btn" data-step="-1">‹ Previous day</button><button class="btn" data-step="1">Next day ›</button></div></div>
- <div class="card sum"><b>Day summary</b><p id="sum" class="mut" style="margin:6px 0 0"></p></div>
+ <div class="card sum"><b>Day summary</b><div id="sum" class="mut" style="margin:6px 0 0;white-space:pre-line;overflow-wrap:anywhere"></div></div>
 </aside>
 <main>
  <h2 id="date"></h2><div class="mut" id="meta"></div>
@@ -93,7 +93,6 @@ function render(){
  cal();
  $("#date").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"long",month:"long",day:"numeric",year:"numeric",timeZone:"UTC"});
  $("#meta").textContent="Archived snapshot";
- $("#sum").textContent="The LLM-written summary of the day, split by who claims what, will appear here.";
  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.t==tab));
  $("#mapPane").hidden=tab!="map";
  if(tab=="map")setTimeout(()=>map.invalidateSize(),0);
@@ -136,7 +135,15 @@ async function loadOcc(){
   POSTS=all.filter(f=>!f.geometry).map(f=>f.properties);
   OCC=feats.length?{type:"FeatureCollection",features:feats}:null
  }catch(e){}
- drawOcc();drawPosts()}
+ drawOcc();drawPosts();drawSum(day)}
+/* Day summary: written by Gemini from that day's saved material, labelled as AI-written; errors are shown as they are */
+async function drawSum(day){
+ const m=META.daily_summary,el=$("#sum");
+ if(!m){el.textContent="No summary for this day yet.";return}
+ if(m.status!="ok"){el.textContent=m.error||"Summary could not be generated.";return}
+ try{const j=await(await get(`data/${day}/${m.files[0]}`)).json();if(day!==sel)return;
+  el.innerHTML=`<i>AI-written by ${esc(j.model)} from ${j.input_items} saved items; it can make mistakes, so check the sources.</i>\n\n`+esc(j.text).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/^#+ ?(.*)$/gm,"<b>$1</b>")}
+ catch(e){el.textContent="The summary file could not be loaded."}}
 function drawOcc(){
  ol.clearLayers();const st=$("#os"),oc=$("#oc");
  const fs=OCC?OCC.features:[],has=new Set(fs.map(f=>f.properties.source));
