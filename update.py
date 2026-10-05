@@ -922,7 +922,7 @@ def run_llm_summary(sid, cfg, args, day, now, data):
     lines = []
     for src, m in meta.items():
         name = SOURCES.get(src, {}).get("name", src)
-        for f in m.get("files", []) if m.get("status") == "ok" else []:
+        for f in [f for f in m.get("files", []) if re.search(r"/(posts|points)/[^/]+\.geojson(\.gz)?$", f)] if m.get("status") == "ok" else []:
             for x in read_json(data / d / f, {"features": []})["features"]:
                 p = x["properties"]
                 if "/posts/" in f:
