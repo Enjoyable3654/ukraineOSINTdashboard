@@ -12,9 +12,11 @@ need nothing else. "geoconfirmed", "warspotting" and "telegram_channel" save geo
 "war_fires" saves The Economist's war-fire model detections as map points; "telegram_posts" saves a channel's
 text posts for the Posts tab (give it a "group" from POST_GROUPS). Other kinds (points, posts) get their own function in the CODE section and an entry in KINDS.
 
-Nothing is dropped silently: polygons that match no rule are kept as category "unmapped", and non-polygon items
-are counted in the run log (data/<day>/meta.json). One failing source never stops the others, and a failed run
-never overwrites good data.
+Acquired data is never altered: every original feature, field and text is kept exactly as received (map shapes are
+not merged, simplified or rounded); area sources also archive their original downloads byte for byte. Big files are
+stored gzip-compressed (lossless). Anything we work out (categories, change layers, statistics, summaries) is added
+alongside, as derived data. Polygons that match no rule are kept as "unmapped". One failing source never stops the
+others, and a failed run never overwrites good data.
 """
 import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, os, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
@@ -23,11 +25,14 @@ from pathlib import Path
 try:
     from shapely.geometry import shape, mapping
     from shapely.ops import unary_union
+    from shapely import force_2d, make_valid
+    from shapely.strtree import STRtree
     HAVE_SHAPELY = True
 except ImportError:  # still runs, but polygons are not merged or simplified
     HAVE_SHAPELY = False
 
 ROOT = Path(__file__).resolve().parent
+REF = ROOT / "ref"   # OCHA boundary files, unchanged and gzipped (see build_reference); credit: OCHA / SSPE "Kartographia", CC BY 3.0 IGO
 
 # =====================================================================================================
 # SETTINGS (edit this part)
@@ -53,7 +58,7 @@ CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
 CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
-CHANGE_MIN_WIDTH_DEGREES = 0.0003   # about 30 m: thinner slivers come from day-to-day simplification, not real change
+CHANGE_MIN_WIDTH_DEGREES = 0.0003   # about 30 m: thinner slivers in the derived change layers are line redrawing, not real change
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
     "official_ua": "Official Ukrainian",
@@ -78,8 +83,6 @@ SOURCES = {
         "name_separator": "///",      # DeepState names look like "<Ukrainian> /// <English> /// <stable code>"
         "name_part": 1,               # keep the English part (for display: popups, source_labels)
         "classify_part": 2,           # match rules against the stable code instead (does not change with wording)
-        "simplify_degrees": 0.0001,   # about 11 m; raise it if files get too big
-        "cleanup_buffer_degrees": 0.00001,   # about 1 m, closes hairline seams after merging
         # First matching rule wins. Anything matching nothing becomes "unmapped" and is still shown.
         # Confirmed from a real inspect run against DeepState's own codes (2026-09-26).
         # "other" = DeepState's other Russian territorial claims not part of the Ukraine war
@@ -104,8 +107,6 @@ SOURCES = {
         "endpoint": "https://map.ukrdailyupdate.com/kmz/{date}/{layer}.kmz",
         "layers": ["Ukrainian", "Russians", "Contested Areas"],
         "lookback_days": 30,
-        "simplify_degrees": 0.0001,
-        "cleanup_buffer_degrees": 0.00001,
         # Matched against "<layer>|<shape colour>" (colour taken from each shape's KMZ style).
         # Confirmed from the real 2026-09-22 files. "background" = whole-country shading (Russia, Belarus,
         # Transnistria; Poland, Romania, Hungary, Slovakia, Moldova, Baltic states): left off the map by the
@@ -186,7 +187,7 @@ SOURCES = {
         "channel": "ministry_of_defense_ua",
         "group": "official_ua",
         "lookback_days": 2,
-        "max_pages": 10,
+        "max_pages": 40,
     },
     "ru_mod": {
         "enabled": True,
@@ -196,9 +197,21 @@ SOURCES = {
         "channel": "mod_russia",
         "group": "official_ru",
         "lookback_days": 2,
-        "max_pages": 10,
+        "max_pages": 40,
     },
     # "another_source": { ...copy a block above and change it... },
+    # Place and region statistics (derived): runs after all sources and before the summary. Uses OCHA's boundaries
+    # in ref/ (raions and settlement outlines). For each day of the window: (a) settlements inside each change patch,
+    # per area source and comparison period; (b) events, fires and changed area per oblast and raion; (c) where the
+    # area sources agree on changes. Saved as data/<day>/place_stats/stats/facts.json.
+    "place_stats": {
+        "enabled": True,
+        "kind": "geo_analysis",
+        "name": "Place and region statistics",
+        "url": "https://data.humdata.org/dataset/cod-ab-ukr",
+        "lookback_days": 30,
+        "area_sources": ["deepstate", "ukrdaily"],
+    },
     # Daily summary: runs last, reads everything saved for the previous day and asks Gemini (Google, free tier) to
     # summarise it. No fallback by the user's choice (2026-10-04): if it fails, the error is saved and shown instead.
     # The API key comes from the GEMINI_API_KEY secret; it is never written to any file.
@@ -326,19 +339,6 @@ def polygons_area_km2(polys):
     return sum(ring_area_km2(p[0]) - sum(ring_area_km2(h) for h in p[1:]) for p in polys)
 
 
-def dissolve(polys, tol, eps):
-    """Merge all polygons of one category into one shape. Returns (geometry, note)."""
-    if HAVE_SHAPELY:
-        merged = unary_union([shape({"type": "Polygon", "coordinates": p}).buffer(0) for p in polys])
-        if eps > 0:
-            merged = merged.buffer(eps, quad_segs=1, join_style="mitre").buffer(-eps, quad_segs=1, join_style="mitre")
-        if tol > 0:
-            merged = merged.simplify(tol, preserve_topology=True)
-        g = mapping(merged)
-        return {"type": g["type"], "coordinates": xy(g["coordinates"])}, "merged and simplified"
-    return {"type": "MultiPolygon", "coordinates": polys}, "NOT merged or simplified (shapely not installed)"
-
-
 def print_inspect(payload, fc, cfg):
     print("Top-level keys:", list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__)
     print("Features:", len(fc["features"]))
@@ -357,36 +357,49 @@ def print_inspect(payload, fc, cfg):
 
 
 def read_json(path, default):
-    return json.loads(path.read_text("utf-8")) if path.exists() else default
+    if not path.exists():
+        return default
+    return json.loads(gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_text("utf-8"))
 
 
-def write_json(path, obj):
+def write_bytes(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     for i in range(5):   # on Windows, antivirus or file sync can briefly lock a file that was just written
         try:
-            return path.write_text(text, "utf-8")
+            return path.write_bytes(content)
         except OSError:
             if i == 4:
                 raise
             time.sleep(0.5)
 
 
+def gz(content):
+    """Lossless gzip with a fixed timestamp, so identical content always gives identical bytes (no repo growth)."""
+    return gzip.compress(content, compresslevel=9, mtime=0)
+
+
+def write_json(path, obj):
+    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    write_bytes(path, gz(text) if path.suffix == ".gz" else text)
+
+
 def run_occupation(sid, cfg, args, day, now, data):
     """DeepState-style source: for each day of the look-back window, the last map version published by the end of
-    that day (UTC) is sorted into categories, merged and saved; then the change layers are rebuilt."""
+    that day (UTC) is archived unchanged and its polygons saved as received (with a category added); then the
+    change layers are rebuilt."""
     if args.inspect or args.from_file:
         try:
-            payload = json.load(open(args.from_file, encoding="utf-8")) if args.from_file else json.loads(fetch(cfg["endpoint"], "application/json"))
+            raw = open(args.from_file, "rb").read() if args.from_file else fetch(cfg["endpoint"], "application/json")
         except Exception as e:
             raise SourceError(f"could not get data from {args.from_file or cfg['endpoint']}: {e}")
+        payload = json.loads(raw)
         snap = payload.get("datetime") if isinstance(payload, dict) else None
-        return occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, args.from_file or cfg["endpoint"])
+        return occupation_from_payload(sid, cfg, args, day, now, data, raw, snap, args.from_file or cfg["endpoint"])
     try:
         versions = sorted(int(v["id"]) for v in json.loads(fetch(cfg["history"], "application/json")))
     except Exception as e:
         raise SourceError(f"could not get the list of map versions from {cfg['history']}: {e}")
-    end, days, last, payload = dt.date.fromisoformat(day), [], None, None
+    end, days, last, raw = dt.date.fromisoformat(day), [], None, None
     for n in range(0 if args.date else cfg["lookback_days"], -1, -1):
         d = end - dt.timedelta(n)
         cutoff = dt.datetime.combine(d + dt.timedelta(1), dt.time(), dt.timezone.utc).timestamp()
@@ -397,41 +410,35 @@ def run_occupation(sid, cfg, args, day, now, data):
         if vid != last:   # consecutive days often share a version: download it once
             time.sleep(1)
             try:
-                payload, last = json.loads(fetch(url, "application/json")), vid
+                raw, last = fetch(url, "application/json"), vid
             except Exception as e:
                 raise SourceError(f"could not get {url}: {e}")
         snap = dt.datetime.fromtimestamp(vid, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        occupation_from_payload(sid, cfg, args, d.isoformat(), now, data, payload, snap, url)
+        occupation_from_payload(sid, cfg, args, d.isoformat(), now, data, raw, snap, url)
         days.append(d.isoformat())
     compute_changes(sid, cfg, args, data, days)
 
 
-def occupation_from_payload(sid, cfg, args, day, now, data, payload, snap, endpoint):
-    """Sort one map version's polygons into categories, merge them, and save them for one day."""
+def occupation_from_payload(sid, cfg, args, day, now, data, raw, snap, endpoint):
+    """Archive one map version unchanged and save its polygons, as received, for one day."""
+    payload = json.loads(raw)
     fc = find_feature_collection(payload)
     if not fc:
         raise SourceError("no GeoJSON FeatureCollection found in the response. Run --inspect and send the output to Claude.")
     if args.inspect:
         return print_inspect(payload, fc, cfg)
-    polys, labels, skipped, n_feat = collections.defaultdict(list), collections.defaultdict(set), collections.Counter(), collections.Counter()
+    feats, skipped = [], collections.Counter()
     for f in fc["features"]:
         g, props = f.get("geometry") or {}, f.get("properties") or {}
-        parts = to_polygons(g)
-        if not parts:
-            skipped[str(g.get("type"))] += 1
+        if g.get("type") not in ("Polygon", "MultiPolygon"):
+            skipped[str(g.get("type"))] += 1   # kept in the archived original
             continue
-        label = label_of(props, cfg)
-        cat = classify(classify_key(props, cfg), props, cfg["rules"])
-        polys[cat].extend(parts)
-        labels[cat].add(label)
-        n_feat[cat] += 1
-    if not polys:
+        feats.append((f, label_of(props, cfg), classify(classify_key(props, cfg), props, cfg["rules"])))
+    if not feats:
         raise SourceError("the response contained no polygons; nothing saved (existing data left untouched).")
-    save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, {
-        "snapshot_time": snap, "endpoint": endpoint, "skipped_non_polygon": dict(skipped)})
-    if args.keep_raw:
-        with gzip.open(data / day / sid / "raw.json.gz", "wt", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False)
+    put_in_place(args, data, day, sid, "raw/snapshot.json.gz", content=gz(raw))
+    save_areas(sid, cfg, args, day, now, data, feats, {"snapshot_time": snap, "endpoint": endpoint,
+                                                       "skipped_non_polygon": dict(skipped), "original": f"{sid}/raw/snapshot.json.gz"})
 
 
 def compute_changes(sid, cfg, args, data, days):
@@ -448,9 +455,10 @@ def compute_changes(sid, cfg, args, data, days):
 
     def areas(d):   # (occupied, contested) shapes of day d, or None if the day has no saved map
         if d not in cache:
-            f = read_json(data / d / sid / fn, None)
-            g = {x["properties"]["category"]: shape(x["geometry"]).buffer(0) for x in f["features"]} if f else None
-            cache[d] = (g.get("russia", empty), g.get("contested", empty)) if g and "russia" in g else None
+            f, g = read_json(data / d / sid / fn, None), collections.defaultdict(list)
+            for x in (f or {"features": []})["features"]:
+                g[x["properties"]["category"]].append(force_2d(shape(x["geometry"])).buffer(0))
+            cache[d] = (unary_union(g["russia"]), unary_union(g["contested"]) if g["contested"] else empty) if g["russia"] else None
         return cache[d]
 
     clean = lambda g: g.buffer(-eps, join_style="mitre").buffer(eps, join_style="mitre")
@@ -490,15 +498,18 @@ def compute_changes(sid, cfg, args, data, days):
 
 
 def kml_shapes(kml):
-    """For each Placemark in a KML file: (name, colour from its style, list of polygons, non-polygon shape types)."""
+    """For each Placemark in a KML file: its fields as given (name, styleUrl, description), colour from its style,
+    its polygons as a GeoJSON geometry with every coordinate value as written (or None), and non-polygon types."""
+    num = lambda t: [[float(v) for v in p.split(",")] for p in t.split()]
     for pm in ET.fromstring(kml).iterfind(".//{*}Placemark"):
-        m = re.search(r"[0-9A-Fa-f]{6}", pm.findtext("{*}styleUrl") or "")
-        polys = []
-        for pg in pm.iterfind(".//{*}Polygon"):
-            rings = [pg.find("{*}outerBoundaryIs//{*}coordinates")] + pg.findall("{*}innerBoundaryIs//{*}coordinates")
-            polys.append([xy([[float(v) for v in t.split(",")[:2]] for t in r.text.split()]) for r in rings if r is not None])
+        style = pm.findtext("{*}styleUrl") or ""
+        m = re.search(r"[0-9A-Fa-f]{6}", style)
+        polys = [[num(r.text) for r in [pg.find("{*}outerBoundaryIs//{*}coordinates")] + pg.findall("{*}innerBoundaryIs//{*}coordinates")
+                  if r is not None] for pg in pm.iterfind(".//{*}Polygon")]
+        geom = None if not polys else {"type": "Polygon", "coordinates": polys[0]} if len(polys) == 1 else {"type": "MultiPolygon", "coordinates": polys}
         other = [t for t in ("Point", "LineString") if pm.find(".//{*}" + t) is not None]
-        yield (pm.findtext("{*}name") or "").strip(), m.group(0).upper() if m else "", polys, other
+        fields = {"name": (pm.findtext("{*}name") or ""), "styleUrl": style, "description": pm.findtext("{*}description")}
+        yield fields, m.group(0).upper() if m else "", geom, other
 
 
 def run_kmz_layers(sid, cfg, args, day, now, data):
@@ -508,25 +519,23 @@ def run_kmz_layers(sid, cfg, args, day, now, data):
     dates = [day] if args.date else [(today - dt.timedelta(n)).isoformat() for n in range(cfg["lookback_days"] + 1)]
     saved = []
     for d in dates:
-        polys, labels, skipped, n_feat = collections.defaultdict(list), collections.defaultdict(set), collections.Counter(), collections.Counter()
-        seen = collections.Counter()
+        feats, skipped, seen, raws = [], collections.Counter(), collections.Counter(), {}
         try:
             for layer in cfg["layers"]:
                 url = cfg["endpoint"].format(date=d, layer=urllib.parse.quote(layer))
                 time.sleep(1)
-                z = zipfile.ZipFile(io.BytesIO(fetch(url)))
+                raws[layer] = fetch(url)
+                z = zipfile.ZipFile(io.BytesIO(raws[layer]))
                 kml = z.read(next(n for n in z.namelist() if n.lower().endswith(".kml")))
-                for name, colour, plist, other in kml_shapes(kml):
+                for fields, colour, geom, other in kml_shapes(kml):
                     for t in other:
                         skipped[t] += 1
-                    if not plist:
+                    if not geom:
                         continue
                     key = f"{layer}|{colour}"
                     cat = classify(key, {}, cfg["rules"])
-                    label = re.sub(r"[\s\d/.:-]+$", "", name) or name   # drop trailing dates like "9/22"
-                    polys[cat].extend(plist)
-                    labels[cat].add(label)
-                    n_feat[cat] += 1
+                    label = re.sub(r"[\s\d/.:-]+$", "", fields["name"].strip()) or fields["name"]   # without trailing dates like "9/22"
+                    feats.append(({"type": "Feature", "geometry": geom, "properties": {**fields, "layer": layer}}, label, cat))
                     seen[(key, label, cat)] += 1
         except Exception as e:
             if getattr(e, "code", None) == 404:
@@ -537,19 +546,25 @@ def run_kmz_layers(sid, cfg, args, day, now, data):
             for (key, label, cat), n in sorted(seen.items()):
                 print(f"  {key} | {label}: {n} -> {cat}")
             return print("Ignored non-polygon items:", dict(skipped))
-        save_polygons(sid, cfg, args, d, now, data, polys, labels, n_feat, {
-            "snapshot_time": d, "endpoint": cfg["endpoint"], "skipped_non_polygon": dict(skipped)})
+        for layer, content in raws.items():   # the original KMZ files, byte for byte
+            put_in_place(args, data, d, sid, f"raw/{layer}.kmz", content=content)
+        save_areas(sid, cfg, args, d, now, data, feats, {"snapshot_time": d, "endpoint": cfg["endpoint"],
+            "skipped_non_polygon": dict(skipped), "original": [f"{sid}/raw/{layer}.kmz" for layer in raws]})
         saved.append(d)
     print(f"[{sid}] checked {dates[-1]} to {dates[0]}")
     compute_changes(sid, cfg, args, data, sorted(saved))
 
 
-def put_in_place(args, data, day, sid, filename, features):
+def put_in_place(args, data, day, sid, filename, features=None, content=None):
     """Write to a working folder first, and only move the finished file into data/ once it is complete.
     If anything before this raises an exception, nothing here runs, so a half-built file never reaches data/
-    and a day already saved from an earlier successful run is left untouched."""
+    and a day already saved from an earlier successful run is left untouched. Saves `features` as a
+    FeatureCollection (gzipped if the name ends in .gz), or `content` bytes exactly as given."""
     work_path = args.working_dir_path / day / sid / filename
-    write_json(work_path, {"type": "FeatureCollection", "features": features})
+    if content is None:
+        write_json(work_path, {"type": "FeatureCollection", "features": features})
+    else:
+        write_bytes(work_path, content)
     final_path = data / day / sid / filename
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -591,8 +606,8 @@ def run_geoconfirmed(sid, cfg, args, day, now, data):
             no_category += 1
             cat = f"(category not found: {icon})"
         by_day[d].append({"type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [round(float(r["Longitude"]), 6), round(float(r["Latitude"]), 6)]},
-            "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": r["Id"], "date": d,
+            "geometry": {"type": "Point", "coordinates": [float(r["Longitude"]), float(r["Latitude"])]},
+            "properties": {"original": {**r, "icon": icon}, "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": r["Id"], "date": d,
                 "link": cfg["placemark_link"].format(id=r["Id"]), "category": cat, "side": r["Faction"],
                 "color": side_color.get(r["Faction"], "#666666"), "description": r["Description"].strip(),
                 "orbat": [u.strip() for u in (r["OrbatUnits"] or r["Units"]).split("|") if u.strip()],
@@ -646,8 +661,8 @@ def run_warspotting(sid, cfg, args, day, now, data):
                 found[d][i] = None
                 continue
             lat, lon = (float(v) for v in x["geo"].split(","))
-            found[d][i] = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
-                "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": i, "date": d,
+            found[d][i] = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {"original": x, "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": i, "date": d,
                     "link": cfg["loss_link"].format(id=i), "category": x.get("type") or "", "side": f"Lost by {x.get('lost_by')}",
                     "color": cfg["color"], "description": " · ".join(v for v in [x.get("model"), x.get("status"),
                         x.get("nearest_location") and f"near {x['nearest_location']}", x.get("tags") and f"tags: {x['tags']}"] if v),
@@ -698,8 +713,8 @@ def run_war_fires(sid, cfg, args, day, now, data):
             if r["date"] in days:
                 t = r["ACQ_TIME"].zfill(4)
                 by_day[r["date"]].append({"type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [round(float(r["LONGITUDE"]), 5), round(float(r["LATITUDE"]), 5)]},
-                    "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": len(by_day[r["date"]]),
+                    "geometry": {"type": "Point", "coordinates": [float(r["LONGITUDE"]), float(r["LATITUDE"])]},
+                    "properties": {"original": r, "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": len(by_day[r["date"]]),
                         "date": r["date"], "link": cfg["link"], "category": "Fire classified as war-related (model estimate)",
                         "side": "Not attributed", "color": cfg["color"], "radius": 3, "orbat": [],
                         "description": f"Satellite heat detection at {t[:2]}:{t[2:]} UTC"
@@ -763,7 +778,7 @@ def run_telegram_posts(sid, cfg, args, day, now, data):
             n += 1
             found[when.date().isoformat()][pid] = {"type": "Feature", "geometry": None, "properties": {
                 "source": sid, "source_name": cfg["name"], "group": cfg["group"], "id": pid, "posted_utc": when.isoformat(),
-                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links}}
+                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "original_html": body}}
     except Exception as e:
         raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
@@ -793,11 +808,11 @@ def run_telegram(sid, cfg, args, day, now, data):
                              and not re.match(r"(Источник|Джерело|Source)\b", l, re.I))
             rule = next((r for r in cfg["side_rules"] if re.search(r["regex"], text)), {"side": "Side not stated", "color": "#666666"})
             found[d][pid] = c and {"type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [round(float(c.group(2)), 6), round(float(c.group(1)), 6)]},
+                "geometry": {"type": "Point", "coordinates": [float(c.group(2)), float(c.group(1))]},
                 "properties": {"source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": pid, "date": d,
                     "date_note": note, "posted_utc": when.isoformat(), "link": f"https://t.me/{ch}/{pid}",
                     "category": cfg["category"], "side": rule["side"], "color": rule["color"], "description": text,
-                    "orbat": [], "sources": links}}
+                    "orbat": [], "sources": links, "original_html": body}}
     except Exception as e:
         raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
@@ -805,6 +820,98 @@ def run_telegram(sid, cfg, args, day, now, data):
                      {d: f"{sum(1 for f in v.values() if f)} with / {sum(1 for f in v.values() if not f)} without coordinates" for d, v in sorted(found.items())})
     save_points_merged(sid, cfg, args, data, now, found, set(), cfg["url"])
     print(f"[{sid}] read {n_posts} posts published since {cutoff:%Y-%m-%d %H:%M} UTC; {no_date} had no date line")
+
+
+def area_km2(g):
+    """Area of a shapely shape in km2 (derived)."""
+    if g.is_empty:
+        return 0
+    m = mapping(force_2d(g))
+    polys = m["coordinates"] if m["type"] == "MultiPolygon" else [m["coordinates"]] if m["type"] == "Polygon" else \
+        [p for x in m.get("geometries", []) if x["type"] in ("Polygon", "MultiPolygon") for p in (x["coordinates"] if x["type"] == "MultiPolygon" else [x["coordinates"]])]
+    return round(polygons_area_km2(polys), 2)
+
+
+def run_geo_analysis(sid, cfg, args, day, now, data):
+    """Derived place/region facts for each day of the window (see the "place_stats" settings)."""
+    if not HAVE_SHAPELY:
+        raise SourceError("shapely is not installed")
+    try:
+        raions = read_json(REF / "ukr_admin2.geojson.gz", None)["features"]
+        setts = read_json(REF / "ukr_admin4.geojson.gz", None)["features"]
+    except Exception as e:
+        raise SourceError(f"boundary files missing in ref/ (run --build-reference): {e}")
+    fix = lambda g: make_valid(force_2d(shape(g))).buffer(0)   # repaired working copy in memory for the maths; files stay as received
+    rg = [fix(f["geometry"]) for f in raions]
+    sg = [fix(f["geometry"]) for f in setts]
+    rtree, stree = STRtree(rg), STRtree(sg)
+    rlab = [(f["properties"]["adm1_name"], f["properties"]["adm2_name"]) for f in raions]
+
+    def region_of(pt):
+        for i in rtree.query(pt):
+            if rg[i].covers(pt):
+                return rlab[i]
+        return ("Outside Ukraine", "Outside Ukraine")
+
+    def places(g):
+        out = []
+        for i in stree.query(g):
+            inter = g.intersection(sg[i])
+            if not inter.is_empty and inter.area >= 0.005 * sg[i].area:   # ignore touches under 0.5% of a settlement
+                q = setts[i]["properties"]
+                out.append({"name": q["adm4_name"], "name_uk": q["adm4_name1"], "type": q["adm4_type"], "hromada": q["adm3_name"],
+                            "raion": q["adm2_name"], "oblast": q["adm1_name"], "share": round(inter.area / sg[i].area, 2)})
+        return sorted(out, key=lambda x: -x["share"])
+
+    end = dt.date.fromisoformat(day)
+    for n in range(0 if args.date else cfg["lookback_days"], -1, -1):
+        d = (end - dt.timedelta(n)).isoformat()
+        meta = read_json(data / d / "meta.json", {"sources": {}})["sources"]
+        if not meta:
+            continue
+        facts = {"date": d, "places": {}, "regions": {"points": {}, "changes": {}}, "agreement": {}}
+        changes = {}   # changes[src][period][category] = shapely shape
+        for src, m in meta.items():
+            for f in [f for f in m.get("files", []) if re.search(r"\.geojson(\.gz)?$", f)] if m.get("status") == "ok" else []:
+                hit = re.search(r"/change_(\w+)\.geojson", f)
+                feats = read_json(data / d / f, {"features": []})["features"]
+                if hit and src in cfg["area_sources"]:
+                    for x in feats:
+                        changes.setdefault(src, {}).setdefault(hit.group(1), {})[x["properties"]["category"]] = fix(x["geometry"])
+                elif "/points/" in f:   # (b) points per oblast and raion
+                    cnt = facts["regions"]["points"].setdefault(src, {})
+                    for x in feats:
+                        ob, ra = region_of(force_2d(shape(x["geometry"])))
+                        cnt.setdefault(ob, {"total": 0, "raions": {}})
+                        cnt[ob]["total"] += 1
+                        cnt[ob]["raions"][ra] = cnt[ob]["raions"].get(ra, 0) + 1
+        for src, per in changes.items():
+            for period, cats in per.items():
+                for cat, g in cats.items():
+                    facts["places"].setdefault(src, {}).setdefault(period, {})[cat] = places(g)            # (a)
+                    reg = facts["regions"]["changes"].setdefault(src, {}).setdefault(period, {}).setdefault(cat, {})
+                    for i in rtree.query(g):                                                             # (b) km2 per raion
+                        a = area_km2(g.intersection(rg[i]))
+                        if a > 0:
+                            reg[f"{rlab[i][1]}, {rlab[i][0]}"] = a
+        a, b = cfg["area_sources"]
+        for period in CHANGE_PERIODS:                                                                    # (c) agreement
+            if period not in changes.get(a, {}) or period not in changes.get(b, {}):
+                continue
+            for cat in ("gained", "lost", "occupied_to_contested", "ukrainian_to_contested"):
+                ga, gb = changes[a][period].get(cat), changes[b][period].get(cat)
+                if ga is None and gb is None:
+                    continue
+                e = shape({"type": "Polygon", "coordinates": []})
+                ga, gb = ga if ga is not None else e, gb if gb is not None else e
+                both = ga.intersection(gb)
+                facts["agreement"].setdefault(period, {})[cat] = {"both_km2": area_km2(both), f"{a}_only_km2": area_km2(ga.difference(gb)),
+                    f"{b}_only_km2": area_km2(gb.difference(ga)), "places_both": [x["name"] for x in places(both)] if not both.is_empty else []}
+        fn = KIND_FILENAMES[cfg["kind"]]
+        put_in_place(args, data, d, sid, fn, content=json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "files": [f"{sid}/{fn}"],
+                                 "boundaries": "OCHA COD-AB v05 (CC BY 3.0 IGO)"})
+    print(f"[{sid}] place and region statistics saved for the last {cfg['lookback_days'] + 1} days")
 
 
 def run_llm_summary(sid, cfg, args, day, now, data):
@@ -830,6 +937,21 @@ def run_llm_summary(sid, cfg, args, day, now, data):
             lines.append(f"[{name} | map change vs {c['compared_with']}, km2] newly occupied {k['u2r'] + k['c2r']} "
                          f"(from contested {k['c2r']}), newly contested {k['u2c']}, back to Ukrainian-held {k['r2u'] + k['c2u']}, "
                          f"occupied became contested {k['r2c']}")
+    f = read_json(data / d / "place_stats/stats/facts.json", None)
+    if f:
+        name = lambda s: SOURCES.get(s, {}).get("name", s)
+        what = {"gained": "newly occupied", "lost": "back to Ukrainian-held", "occupied_to_contested": "occupied became contested",
+                "ukrainian_to_contested": "Ukrainian-held became contested"}
+        for src, per in f["places"].items():
+            for cat, pl in per.get("1d", {}).items():
+                if pl:
+                    lines.append(f"[{name(src)} | places in '{what.get(cat, cat)}' area vs previous day (share of settlement inside)] "
+                                 + "; ".join(f"{x['name']} ({x['type']}, {x['raion']} raion, {x['oblast']}) {round(x['share'] * 100)}%" for x in pl[:25]))
+        for src, obl in f["regions"]["points"].items():
+            lines.append(f"[{name(src)} | items per oblast] " + "; ".join(f"{o}: {v['total']}" for o, v in sorted(obl.items(), key=lambda kv: -kv[1]["total"])))
+        for cat, v in f["agreement"].get("1d", {}).items():
+            lines.append(f"[Area sources agreement, '{what.get(cat, cat)}' vs previous day, km2] " + ", ".join(f"{k}: {x}" for k, x in v.items() if k != "places_both")
+                         + (f"; settlements where both agree: {', '.join(v['places_both'][:25])}" if v["places_both"] else ""))
     material = "\n".join(lines)[:cfg["max_input_chars"]]
     try:
         key = os.environ.get("GEMINI_API_KEY")
@@ -861,53 +983,59 @@ def run_llm_summary(sid, cfg, args, day, now, data):
     print(f"[{sid}] {d}: summary saved ({len(lines)} items in, {len(text.split())} words out)")
 
 
-def save_polygons(sid, cfg, args, day, now, data, polys, labels, n_feat, extra):
-    """Merge each category's polygons, save data/<day>/<source>/polygons/occupation.geojson, log it in meta.json."""
-    hidden = set(cfg.get("leave_off_map", []))
-    left_off = {c: sorted(labels[c]) for c in polys if c in hidden}
-    polys = {c: p for c, p in polys.items() if c not in hidden}
-    if not polys:
+def save_areas(sid, cfg, args, day, now, data, feats, extra):
+    """Save each polygon exactly as received, with derived fields added (category, label, area), as
+    data/<day>/<source>/polygons/occupation.geojson.gz, and log it in meta.json. Categories the user chose to leave
+    off the map are not drawn (they stay in the archived original and are listed by name in meta.json)."""
+    hidden, out, by_cat, labels = set(cfg.get("leave_off_map", [])), [], {}, collections.defaultdict(set)
+    for f, label, cat in feats:
+        labels[cat].add(label)
+        if cat in hidden:
+            continue
+        g = f["geometry"]
+        area = polygons_area_km2([[[c[:2] for c in r] for r in p] for p in (g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]])])
+        b = by_cat.setdefault(cat, {"source_polygons": 0, "area_km2_approx": 0})
+        b["source_polygons"] += 1
+        b["area_km2_approx"] += area
+        out.append({**f, "properties": {**(f.get("properties") or {}), "source": sid, "source_name": cfg["name"],
+            "source_url": cfg["url"], "category": cat, "category_label": CATEGORIES.get(cat, {}).get("label", cat),
+            "label": label, "snapshot_time": extra["snapshot_time"], "area_km2_approx": round(area, 2)}})
+    if not out:
         raise SourceError(f"{day}: no polygons left to show; nothing saved (existing data left untouched).")
-    features, by_cat, note = [], {}, ""
-    for cat, plist in polys.items():
-        geom, note = dissolve(plist, cfg["simplify_degrees"], cfg.get("cleanup_buffer_degrees", 0))
-        area = polygons_area_km2(geom["coordinates"] if geom["type"] == "MultiPolygon" else [geom["coordinates"]])
-        by_cat[cat] = {"source_polygons": n_feat[cat], "area_km2_approx": round(area)}
-        features.append({"type": "Feature", "geometry": geom, "properties": {
-            "source": sid, "source_name": cfg["name"], "source_url": cfg["url"],
-            "category": cat, "category_label": CATEGORIES.get(cat, {}).get("label", cat),
-            "snapshot_time": extra["snapshot_time"], "source_labels": sorted(labels[cat]), "source_polygons": n_feat[cat],
-            "area_km2_approx": round(area), "processing": note}})
-
+    for b in by_cat.values():
+        b["area_km2_approx"] = round(b["area_km2_approx"])
     filename = KIND_FILENAMES[cfg["kind"]]
-    final_path = put_in_place(args, data, day, sid, filename, features)
-    entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra,
-             "files": [f"{sid}/{filename}"], "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
-             "processing": note}
+    final_path = put_in_place(args, data, day, sid, filename, out)
+    left_off = {c: sorted(labels[c]) for c in labels if c in hidden}
+    entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra, "files": [f"{sid}/{filename}"],
+             "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])), "processing": "unaltered"}
     if left_off:
         entry["left_off_map"] = left_off
     save_meta(data, day, sid, entry)
-
-    print(f"[{sid}] saved {final_path}  ({note})")
-    for cat, v in by_cat.items():
-        print(f"  {cat}: {v['source_polygons']} source polygons, about {v['area_km2_approx']:,} km2")
-    if left_off:
-        print("  Left off the map:", left_off)
+    print(f"[{sid}] saved {final_path}: " + ", ".join(f"{c} {v['source_polygons']} shapes ~{v['area_km2_approx']:,} km2" for c, v in by_cat.items()))
     if "unmapped" in by_cat:
         print("  WARNING: some types matched no rule:", "; ".join(sorted(labels["unmapped"])))
-    if extra.get("skipped_non_polygon"):
-        print("  Ignored non-polygon items:", extra["skipped_non_polygon"])
 
 
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
          "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires,
-         "telegram_posts": run_telegram_posts, "llm_summary": run_llm_summary}   # add new kinds of source here
+         "telegram_posts": run_telegram_posts, "llm_summary": run_llm_summary,
+         "geo_analysis": run_geo_analysis}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
-KIND_FILENAMES = {"occupation": "polygons/occupation.geojson", "kmz_layers": "polygons/occupation.geojson",
+KIND_FILENAMES = {"occupation": "polygons/occupation.geojson.gz", "kmz_layers": "polygons/occupation.geojson.gz",
                   "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
-                  "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson",
-                  "telegram_posts": "posts/posts.geojson", "llm_summary": "text/summary.json"}
+                  "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson.gz",
+                  "telegram_posts": "posts/posts.geojson", "llm_summary": "text/summary.json",
+                  "geo_analysis": "stats/facts.json"}
+
+
+def build_reference(src):
+    """One-time: copy OCHA's Ukraine boundaries (COD-AB v05, downloaded by hand from HDX into `src`) into ref/,
+    unchanged but gzip-compressed: raions (admin 2) and settlement outlines (admin 4)."""
+    for name in ("ukr_admin2.geojson", "ukr_admin4.geojson"):
+        write_bytes(REF / f"{name}.gz", gz((Path(src) / name).read_bytes()))
+    print("saved", *(f"{p.name} {p.stat().st_size // 1024} KB" for p in REF.glob("*.gz")))
 
 
 def save_meta(data, day, sid, entry):
@@ -925,9 +1053,11 @@ def main():
     ap.add_argument("--date", help="folder date YYYY-MM-DD (default: today, UTC)")
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
     ap.add_argument("--working-dir", default=str(ROOT / "data_working"), help="scratch space; never committed, cleared after each run")
-    ap.add_argument("--keep-raw", action="store_true", help="also save the raw response as .json.gz (large)")
+    ap.add_argument("--build-reference", metavar="DIR", help="one-time: trim OCHA boundary files from DIR into ref/")
     ap.add_argument("--lookback", type=int, help="override every source's lookback_days (e.g. a one-time back-fill)")
     args = ap.parse_args()
+    if args.build_reference:
+        return build_reference(args.build_reference)
 
     if args.inspect:
         ids = [args.inspect]

@@ -117,6 +117,8 @@ const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"
 let OCC=null,CATS={},SRCS={},PG={},POSTS=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",occP="1d",META={},incC=true;
 /* data files change daily: always ask GitHub whether there is a newer copy (fast "not modified" if not) */
 const get=u=>fetch(u,{cache:"no-cache"});
+/* big data files are stored gzip-compressed (lossless); the browser unpacks them here */
+const getJson=async u=>{const r=await get(u);if(!r.ok)throw Error(r.status);return u.endsWith(".gz")?new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).json():r.json()};
 async function loadOcc(){
  const day=sel;OCC=null;POSTS=[];META={};
  try{
@@ -124,11 +126,11 @@ async function loadOcc(){
   if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;PG=j.post_groups||{}}
   const meta=await(await get(`data/${day}/meta.json`)).json();META=meta.sources||{};
   /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
-  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/\/polygons\/(occupation|change_\w+)\.geojson$/.test(f)||f.endsWith("/points/events.geojson")||f.endsWith("/points/fires.geojson"));
+  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/\/(polygons\/(occupation|change_\w+)|points\/(events|fires))\.geojson(\.gz)?$/.test(f));
   const pf=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/posts/posts.geojson"));
   files.sort((a,b)=>a.includes("/change_")-b.includes("/change_"));   /* change layers drawn on top */
   const parts=await Promise.all(files.concat(pf).map(async f=>{
-   try{const r=await get(`data/${day}/${f}`);if(!r.ok)return[];return(await r.json()).features}catch(e){return[]}
+   try{return(await getJson(`data/${day}/${f}`)).features}catch(e){return[]}
   }));
   const all=parts.flat(),feats=all.filter(f=>f.geometry);
   if(day!==sel)return;
@@ -166,7 +168,7 @@ function drawOcc(){
   pointToLayer:(f,ll)=>L.circleMarker(ll,{pane:"markerPane",radius:f.properties.radius||6}),
   style:f=>{if(pt(f))return{color:"#fff",weight:f.properties.radius?.5:1.5,fillColor:f.properties.color,fillOpacity:.9};const c=f.properties.category,k=col(c);return f.properties.period?(out(c)?{color:out(c),weight:2.5,fill:false}:{color:k,weight:1,fillColor:k,fillOpacity:.65}):{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
   onEachFeature:(f,l)=>{const p=f.properties;if(pt(f))return l.bindPopup(evPop(p),{maxWidth:340});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>`+
-   (p.period?`Compared with ${esc(p.compared_with)}`:`Original types: ${esc(p.source_labels.join("; "))}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol)}
+   (p.period?`Compared with ${esc(p.compared_with)}`:`Original type: ${esc(p.label||"")}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol)}
 /* Posts tab: Telegram posts of the selected day, filterable by group and by channel; text as posted, media only linked */
 /* Search: words (all must appear), AND, OR, NOT, (brackets), "exact phrases"; not case-sensitive.
    Returns a test function, or null if the search can't be read (e.g. an extra closing bracket). */
