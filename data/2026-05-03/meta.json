@@ -1,1 +1,1 @@
-{"date":"2026-05-03","sources":{"warspotting":{"status":"ok","fetched_at_utc":"2026-10-08T02:32:15+00:00","endpoint":"https://ukr.warspotting.net/api/losses/russia/<date>/1/","events":0,"no_coordinates":1,"no_coordinates_ids":[47116]}}}
+{"date":"2026-05-03","sources":{"warspotting":{"status":"ok","fetched_at_utc":"2026-10-08T12:04:55+00:00","endpoint":"https://ukr.warspotting.net/api/losses/russia/<date>/1/","events":0,"no_coordinates":1,"no_coordinates_ids":[47116]}}}
