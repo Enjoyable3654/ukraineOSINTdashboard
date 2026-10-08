@@ -58,6 +58,7 @@ CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
 CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
+SEAM_CLOSE_DEGREES = 0.00001   # about 1 m: closes hairline seams when merging shapes for the map (no simplifying)
 CHANGE_MIN_WIDTH_DEGREES = 0.0003   # about 30 m: thinner slivers in the derived change layers are line redrawing, not real change
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
@@ -447,7 +448,7 @@ def compute_changes(sid, cfg, args, data, days):
     "lost" = became Ukrainian-held (R->U, C->U), merged where touching; "occupied_to_contested" (R->C) and
     "ukrainian_to_contested" (U->C). Saved as polygons/change_<period>.geojson; the area of each of the six
     transitions goes in meta.json under "change_stats" so the map can total them either way. Slivers thinner
-    than CHANGE_MIN_WIDTH_DEGREES are dropped (they come from daily simplification, not real change)."""
+    than CHANGE_MIN_WIDTH_DEGREES are dropped from this derived layer (mostly line redrawing, not real change)."""
     if not HAVE_SHAPELY:
         return print(f"[{sid}] change layers skipped: shapely is not installed")
     fn, eps, cache = KIND_FILENAMES[cfg["kind"]], CHANGE_MIN_WIDTH_DEGREES, {}
@@ -984,31 +985,33 @@ def run_llm_summary(sid, cfg, args, day, now, data):
 
 
 def save_areas(sid, cfg, args, day, now, data, feats, extra):
-    """Save each polygon exactly as received, with derived fields added (category, label, area), as
-    data/<day>/<source>/polygons/occupation.geojson.gz, and log it in meta.json. Categories the user chose to leave
-    off the map are not drawn (they stay in the archived original and are listed by name in meta.json)."""
-    hidden, out, by_cat, labels = set(cfg.get("leave_off_map", [])), [], {}, collections.defaultdict(set)
+    """Map layer: for each category, all of the source's polygons merged into one clean shape (hairline seams
+    closed), with full coordinate precision and no simplifying. Saved as polygons/occupation.geojson.gz. The
+    original download is archived unchanged next to it. Categories the user chose to leave off the map are not
+    drawn (they stay in the archived original and are listed by name in meta.json)."""
+    hidden, groups, labels = set(cfg.get("leave_off_map", [])), collections.defaultdict(list), collections.defaultdict(set)
     for f, label, cat in feats:
         labels[cat].add(label)
-        if cat in hidden:
-            continue
-        g = f["geometry"]
-        area = polygons_area_km2([[[c[:2] for c in r] for r in p] for p in (g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]])])
-        b = by_cat.setdefault(cat, {"source_polygons": 0, "area_km2_approx": 0})
-        b["source_polygons"] += 1
-        b["area_km2_approx"] += area
-        out.append({**f, "properties": {**(f.get("properties") or {}), "source": sid, "source_name": cfg["name"],
-            "source_url": cfg["url"], "category": cat, "category_label": CATEGORIES.get(cat, {}).get("label", cat),
-            "label": label, "snapshot_time": extra["snapshot_time"], "area_km2_approx": round(area, 2)}})
-    if not out:
+        if cat not in hidden:
+            groups[cat].append(make_valid(force_2d(shape(f["geometry"]))))
+    if not groups:
         raise SourceError(f"{day}: no polygons left to show; nothing saved (existing data left untouched).")
-    for b in by_cat.values():
-        b["area_km2_approx"] = round(b["area_km2_approx"])
+    out, by_cat = [], {}
+    for cat, gs in groups.items():
+        g = unary_union(gs)
+        g = g.buffer(SEAM_CLOSE_DEGREES, join_style="mitre").buffer(-SEAM_CLOSE_DEGREES, join_style="mitre")
+        m, area = mapping(g), area_km2(g)
+        by_cat[cat] = {"source_polygons": len(gs), "area_km2_approx": round(area)}
+        out.append({"type": "Feature", "geometry": {"type": m["type"], "coordinates": m["coordinates"]}, "properties": {
+            "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "category": cat,
+            "category_label": CATEGORIES.get(cat, {}).get("label", cat), "snapshot_time": extra["snapshot_time"],
+            "source_labels": sorted(labels[cat]), "source_polygons": len(gs), "area_km2_approx": round(area)}})
     filename = KIND_FILENAMES[cfg["kind"]]
     final_path = put_in_place(args, data, day, sid, filename, out)
     left_off = {c: sorted(labels[c]) for c in labels if c in hidden}
     entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra, "files": [f"{sid}/{filename}"],
-             "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])), "processing": "unaltered"}
+             "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
+             "processing": "merged per category, seams closed (~1 m), no simplifying; original archived unchanged"}
     if left_off:
         entry["left_off_map"] = left_off
     save_meta(data, day, sid, entry)

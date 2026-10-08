@@ -13,6 +13,9 @@ on:
       source:
         description: "Source to inspect (only used in inspect mode)"
         default: deepstate
+      lookback:
+        description: "Optional: re-fetch this many days for every source (e.g. a one-time rebuild). Leave empty for normal runs."
+        default: ""
 
 permissions:
   contents: write               # lets the job save the new data files into the repo
@@ -23,6 +26,7 @@ jobs:
     env:
       MODE: ${{ github.event.inputs.mode }}
       SRC: ${{ github.event.inputs.source }}
+      LOOKBACK: ${{ github.event.inputs.lookback }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +38,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # set in the repo's Settings > Secrets; never stored in a file
         run: |
-          if [ "$MODE" = "inspect" ]; then python update.py --inspect "${SRC:-deepstate}"; else python update.py; fi
+          if [ "$MODE" = "inspect" ]; then python update.py --inspect "${SRC:-deepstate}"; else python update.py ${LOOKBACK:+--lookback "$LOOKBACK"}; fi
 
       - name: Commit new data
         if: always() && github.event.inputs.mode != 'inspect'
