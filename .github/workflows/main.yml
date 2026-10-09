@@ -16,6 +16,12 @@ on:
       lookback:
         description: "Optional: re-fetch this many days for every source (e.g. a one-time rebuild). Leave empty for normal runs."
         default: ""
+      only:
+        description: "Optional: run just this one source (e.g. daily_summary). Leave empty for normal runs."
+        default: ""
+      date:
+        description: "Optional: work on this date, YYYY-MM-DD (e.g. redo one day's summary). Leave empty for normal runs."
+        default: ""
 
 permissions:
   contents: write               # lets the job save the new data files into the repo
@@ -27,6 +33,8 @@ jobs:
       MODE: ${{ github.event.inputs.mode }}
       SRC: ${{ github.event.inputs.source }}
       LOOKBACK: ${{ github.event.inputs.lookback }}
+      ONLY: ${{ github.event.inputs.only }}
+      DAY: ${{ github.event.inputs.date }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,7 +46,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # set in the repo's Settings > Secrets; never stored in a file
         run: |
-          if [ "$MODE" = "inspect" ]; then python update.py --inspect "${SRC:-deepstate}"; else python update.py ${LOOKBACK:+--lookback "$LOOKBACK"}; fi
+          if [ "$MODE" = "inspect" ]; then python update.py --inspect "${SRC:-deepstate}"; else python update.py ${LOOKBACK:+--lookback "$LOOKBACK"} ${ONLY:+--only "$ONLY"} ${DAY:+--date "$DAY"}; fi
 
       - name: Commit new data
         if: always() && github.event.inputs.mode != 'inspect'
