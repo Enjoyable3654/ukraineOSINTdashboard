@@ -18,7 +18,7 @@ stored gzip-compressed (lossless). Anything we work out (categories, change laye
 alongside, as derived data. Polygons that match no rule are kept as "unmapped". One failing source never stops the
 others, and a failed run never overwrites good data.
 """
-import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, os, re, shutil, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, os, re, shutil, sys, time, urllib.error, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -964,8 +964,16 @@ def run_llm_summary(sid, cfg, args, day, now, data):
             headers={"Content-Type": "application/json", "x-goog-api-key": key, "User-Agent": USER_AGENT},
             data=json.dumps({"contents": [{"parts": [{"text": f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}"}]}],
                              "generationConfig": cfg["generation"]}).encode())
-        with urllib.request.urlopen(req, timeout=300) as r:
-            out = json.loads(r.read().decode("utf-8"))
+        for attempt in range(5):   # "busy"/"too many requests" replies are usually brief: wait 30 s, 1, 2, 4 min
+            try:
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    out = json.loads(r.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code not in (429, 500, 503) or attempt == 4:
+                    raise
+                print(f"[{sid}] Gemini busy ({e.code}), retrying in {30 * 2 ** attempt} s", file=sys.stderr)
+                time.sleep(30 * 2 ** attempt)
         text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
         if not text:
             raise RuntimeError(f"Gemini returned no text ({out['candidates'][0].get('finishReason')})")
