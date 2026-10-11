@@ -979,7 +979,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
     """Rebuild all events from every saved claim (point items and posts) on every day. Claims sharing a link to the
     same specific post are grouped, strongest links first, never putting two claims from the same source together;
     links that would need that are kept as possible matches. Groups with a location become events, filed under the
-    date of their earliest claim; an event's ID comes from its earliest claim, so it stays stable."""
+    earliest date its claims give for when it happened; an event's ID comes from its earliest claim, so it stays stable."""
     claims = {}
     for f in sorted(data.glob("*/*/points/events.geojson")) + sorted(data.glob("*/*/posts/posts.geojson")):
         src = f.parent.parent.name
@@ -1029,7 +1029,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
         lead = min(located, key=lambda c: (order.index(claims[c]["src"]) if claims[c]["src"] in order else 99, claims[c]["when"]))
         lp = claims[lead]["x"]["properties"]
         eid = "ev-" + hashlib.sha1(members[0].encode()).hexdigest()[:10]
-        d = claims[members[0]]["when"][:10]
+        d = min((claims[c]["x"]["properties"].get("date") or claims[c]["when"])[:10] for c in members)   # when it happened, not when reported
         lst = []
         for c in members:
             p = claims[c]["x"]["properties"]
