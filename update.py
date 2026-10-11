@@ -979,6 +979,8 @@ def run_geo_analysis(sid, cfg, args, day, now, data):
                 elif "/points/" in f:   # (b) points per oblast and raion
                     cnt = facts["regions"]["points"].setdefault(src, {})
                     for x in feats:
+                        if not x["geometry"]:   # events with no location found
+                            continue
                         ob, ra = region_of(force_2d(shape(x["geometry"])))
                         cnt.setdefault(ob, {"total": 0, "raions": {}})
                         cnt[ob]["total"] += 1
