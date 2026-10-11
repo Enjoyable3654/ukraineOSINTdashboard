@@ -33,10 +33,11 @@ a{color:var(--acc)}
 .drop h3{font-size:13px;margin:10px 0 4px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
 .drop h3:first-child{margin-top:0}
 #rt{position:fixed;top:10px;right:10px;z-index:1002;display:flex;gap:4px;padding:4px}
-#panel{position:fixed;top:56px;right:10px;bottom:10px;width:min(460px,calc(100vw - 20px));z-index:1001;display:flex;flex-direction:column}
+#panel{position:fixed;top:0;right:0;bottom:0;width:460px;z-index:1001;display:flex;flex-direction:column;border-radius:0;border-width:0 0 0 1px}
+body.pan #map{right:460px}body.pan #rt{right:470px}
 .pb{overflow:auto;flex:1;padding:10px}
 #tn{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:1000;padding:8px 12px;max-width:90vw;background:var(--warn);color:var(--warnt)}
-@media(max-width:700px){#ps{width:150px}#rt{top:auto;bottom:10px}#panel{top:auto;left:0;right:0;bottom:58px;width:100%;height:65vh;border-radius:12px 12px 0 0}}
+@media(max-width:700px){#ps{width:150px}#rt{top:auto;bottom:10px}body.pan #map{right:0}body.pan #rt{right:10px}#panel{top:auto;left:0;right:0;bottom:58px;width:100%;height:65vh;border-radius:12px 12px 0 0;border-width:1px}}
 /* calendar */
 .ch{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .ch button{border:1px solid var(--bd);background:none;border-radius:6px;width:30px;height:28px}
@@ -63,7 +64,7 @@ a{color:var(--acc)}
   <button class="btn" data-step="-1" title="Previous day" aria-label="Previous day">‹</button>
   <button class="btn" id="dbtn" data-drop="calbox" title="Pick a day"></button>
   <button class="btn" data-step="1" title="Next day" aria-label="Next day">›</button>
-  <input id="ps" type="search" placeholder="Search places (English or Ukrainian)" autocomplete="off" aria-label="Search places">
+  <button class="btn" id="psb" title="Search places" aria-label="Search places">🔍</button><input id="ps" type="search" placeholder="Search places (English or Ukrainian)" autocomplete="off" aria-label="Search places" hidden>
   <button class="btn" data-drop="lay">Layers ▾</button>
   <button class="btn" data-drop="sumbox">Summary ▾</button>
   <button class="btn" id="theme" title="Theme"></button>
@@ -98,7 +99,7 @@ const key=d=>new Date(d).toISOString().slice(0,10);
 const A={};
 for(let d=Date.UTC(2026,7,24);d<=Date.now();d+=864e5)A[key(d)]=1;
 const map=L.map("map",{preferCanvas:true,zoomControl:false}).setView([48.6,31.2],6),rl=L.layerGroup().addTo(map);
-L.control.zoom({position:"bottomleft"}).addTo(map);map.attributionControl.setPosition("bottomleft");   /* OSM credit stays visible, clear of the right panels */
+map.attributionControl.setPosition("bottomleft");L.control.zoom({position:"bottomleft"}).addTo(map);   /* OSM credit at the very bottom, under the zoom buttons */
 /* Basemap config: change url/attr here to switch tile provider. */
 const BASE={url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png",attr:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · <a href="https://www.openstreetmap.org/fixthemap">Report a map issue</a> · Places: OCHA / Kartographia (CC BY 3.0 IGO)'};
 const tn=$("#tn");
@@ -112,6 +113,7 @@ const DROPS=["calbox","sres","sumbox","lay"],drop=id=>DROPS.forEach(d=>$("#"+d).
 let panel=null;const scr={};
 const showPanel=p=>{if(panel)scr[panel]=$(panel=="post"?"#pp":"#pf").scrollTop;panel=p===panel?null:p;
  $("#panel").hidden=!panel;$("#pp").hidden=panel!="post";$("#pf").hidden=panel!="feat";
+ document.body.classList.toggle("pan",!!panel);map.invalidateSize();
  document.querySelectorAll("[data-panel]").forEach(b=>b.classList.toggle("on",b.dataset.panel==panel));
  if(panel)$(panel=="post"?"#pp":"#pf").scrollTop=scr[panel]||0};
 function cal(){
@@ -215,8 +217,8 @@ function listFeat(){
    :`<span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category||"",f&&f.terms)}</b><div class="mut">${esc(p.source_name)} · ${esc(p.side||"")} · ${esc(p.date||"")}</div><div style="margin-top:4px">${hl((p.description||"").slice(0,300),f&&f.terms)}</div>`)+
   `<button class="btn" data-go="${i}" style="margin-top:6px">Show on map</button></div>`).join("")}
 function goFeat(i){const {f,l}=FL[i];if(panel)showPanel(panel);
- if(f.geometry.type=="Point")map.setView(l.getLatLng(),Math.max(map.getZoom(),11));else map.fitBounds(l.getBounds(),{maxZoom:12});
- setTimeout(()=>l.openPopup(),350)}
+ map.once("moveend",()=>l.openPopup());
+ if(f.geometry.type=="Point")map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5});else map.flyToBounds(l.getBounds(),{maxZoom:12,duration:1.5})}
 /* Place search: OCHA settlement names (English or Ukrainian), loaded the first time you type */
 let PLACES=null,pmark=null,pres=[];
 async function findPlace(q){
@@ -226,7 +228,7 @@ async function findPlace(q){
  pres=PLACES.filter(t=>rank(t)<2).sort((a,b)=>rank(a)-rank(b)||big[a[2]]-big[b[2]]).slice(0,12);
  $("#sres").innerHTML=pres.map((t,i)=>`<button data-pl="${i}"><b>${esc(t[0])}</b> · ${esc(t[1])}<div class="mut">${esc(t[2])}, ${esc(t[3])} raion, ${esc(t[4])}</div></button>`).join("")||'<span class="mut">No matching place.</span>';
  if($("#sres").hidden)drop("sres")}
-function goPlace(i){const t=pres[i];drop(null);map.setView([t[5],t[6]],12);
+function goPlace(i){const t=pres[i];drop(null);map.flyTo([t[5],t[6]],12,{duration:1.5});
  if(pmark)map.removeLayer(pmark);pmark=L.circleMarker([t[5],t[6]],{pane:"markerPane",radius:9,color:"#000",weight:2,fillOpacity:0}).bindTooltip(`${t[0]} · ${t[1]}`,{permanent:true,direction:"top"}).addTo(map)}
 /* Posts panel: Telegram posts of the selected day, filterable by group and by channel; text as posted, media only linked */
 /* Search: words (all must appear), AND, OR, NOT, (brackets), "exact phrases"; not case-sensitive.
@@ -300,6 +302,9 @@ async function addTiff(file){
 function lyr(){$("#lyrs").innerHTML=RL.map((r,i)=>`<div class="ly"><b>${r.name.replace(/[<&>]/g,"")}</b><input type="range" min="0" max="1" step=".05" value="${r.layer.options.opacity}" data-o="${i}" aria-label="Opacity"><button class="btn" data-z="${i}">Zoom to</button><button class="btn" data-x="${i}">Remove</button></div>`).join("")}
 const addAll=fs=>[...fs].reduce((p,f)=>p.then(()=>addTiff(f)),Promise.resolve());
 $("#gt").onchange=e=>{addAll(e.target.files);e.target.value=""};
+/* search box opens from the magnifying glass and folds away again when left empty */
+$("#psb").onclick=()=>{$("#psb").hidden=true;$("#ps").hidden=false;$("#ps").focus()};
+$("#ps").onblur=()=>setTimeout(()=>{if(!$("#ps").value.trim()){$("#ps").hidden=true;$("#psb").hidden=false;$("#sres").hidden=true}},200);
 $("#map").ondragover=e=>e.preventDefault();$("#map").ondrop=e=>{e.preventDefault();addAll(e.dataTransfer.files)};
 $("#lyrs").oninput=e=>{const i=e.target.dataset.o;if(i!=null)RL[i].layer.setOpacity(e.target.value)};
 $("#lyrs").onclick=e=>{const b=e.target.dataset;if(b.z)map.fitBounds(RL[b.z].bounds);if(b.x){rl.removeLayer(RL[b.x].layer);RL.splice(b.x,1);lyr()}};
