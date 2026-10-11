@@ -1043,9 +1043,16 @@ KIND_FILENAMES = {"occupation": "polygons/occupation.geojson.gz", "kmz_layers": 
 
 def build_reference(src):
     """One-time: copy OCHA's Ukraine boundaries (COD-AB v05, downloaded by hand from HDX into `src`) into ref/,
-    unchanged but gzip-compressed: raions (admin 2) and settlement outlines (admin 4)."""
+    unchanged but gzip-compressed: raions (admin 2) and settlement outlines (admin 4); plus a derived place list."""
     for name in ("ukr_admin2.geojson", "ukr_admin4.geojson"):
         write_bytes(REF / f"{name}.gz", gz((Path(src) / name).read_bytes()))
+    # Derived: a small place-name list for the map's search box (English and Ukrainian names, type, raion, oblast,
+    # and a point inside each settlement), so the page doesn't have to load the full outlines.
+    places = []
+    for f in json.load(open(Path(src) / "ukr_admin4.geojson", encoding="utf-8"))["features"]:
+        q, pt = f["properties"], make_valid(shape(f["geometry"])).representative_point()
+        places.append([q["adm4_name"], q["adm4_name1"], q["adm4_type"], q["adm2_name"], q["adm1_name"], round(pt.y, 5), round(pt.x, 5)])
+    write_json(REF / "places.json.gz", places)
     print("saved", *(f"{p.name} {p.stat().st_size // 1024} KB" for p in REF.glob("*.gz")))
 
 
