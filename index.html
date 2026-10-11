@@ -213,11 +213,12 @@ function drawFeat(){
   `<div class="mut">Side: ${uniq(fside).map(v=>cb("side",v,v)).join("")}</div>`+
   `<div class="mut" style="margin-bottom:6px">Kind: ${cb("kind","event","Map events")}${cb("kind","change","Area changes")}</div>`+
   `<input id="fq" class="fi" type="search" value="${esc(fq)}" placeholder="Search features (AND, OR, NOT, &quot;phrases&quot;)">`+
-  `<p class="mut" style="margin:4px 0 8px">Newest first. Times are when the source posted it where the source gives one (Telegram); GeoConfirmed and WarSpotting give a date only. War fires are map-only.</p><div id="flist"></div>`;
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Times: Telegram posting time; for GeoConfirmed, the earliest of its linked sources (where a time can be read); WarSpotting gives a date only. War fires are map-only.</p><div id="flist"></div>`;
  listFeat()}
 const fside=p=>p.period?"Area change":p.side||"Not stated",
- fkey=p=>p.posted_utc||(p.date||p.snapshot_time||"")+"T00:00",   /* date-only items sort after timed ones of the same day */
- fwhen=p=>p.posted_utc?`posted ${p.posted_utc.slice(0,10)} ${p.posted_utc.slice(11,16)} UTC`:p.period?`map of ${p.snapshot_time}`:`${p.date} (date only)`;
+ ptime=p=>p.posted_utc||p.earliest_source_utc,
+ fkey=p=>ptime(p)||(p.date||p.snapshot_time||"")+"T00:00",   /* date-only items sort after timed ones of the same day */
+ fwhen=p=>p.posted_utc?`posted ${p.posted_utc.slice(0,10)} ${p.posted_utc.slice(11,16)} UTC`:p.earliest_source_utc?`earliest source posted ${p.earliest_source_utc.slice(0,10)} ${p.earliest_source_utc.slice(11,16)} UTC`:p.period?`map of ${p.snapshot_time}`:`${p.date} (date only)`;
 function listFeat(){
  const f=fq.trim()?qparse(fq):null,txt=p=>[p.category,p.category_label,p.description,p.side,p.source_name,(p.orbat||[]).join(" ")].join(" ").toLowerCase(),
   ok=p=>fOn["src|"+p.source_name]!==false&&fOn["side|"+fside(p)]!==false&&fOn["kind|"+(p.period?"change":"event")]!==false;
@@ -272,7 +273,7 @@ function listPosts(){
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
 const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><br><span class="mut">${esc(p.date)}${p.date_note?` (${esc(p.date_note)})`:""} · ${esc(p.side)}</span><p style="white-space:pre-line">${esc(p.description)}</p>`+
  (p.orbat.length?`<b>ORBAT:</b> ${p.orbat.map(esc).join("; ")}<br>`:"")+
- (p.geolocation?`<b>Geolocation:</b><br>${p.geolocation.map(lk).join("<br>")||"none listed"}<br>`:"")+(p.sources?`<b>Sources:</b><br>${p.sources.map(lk).join("<br>")||"none listed"}<br>`:"")+
+ (p.geolocation?`<b>Geolocation:</b><br>${p.geolocation.map(lk).join("<br>")||"none listed"}<br>`:"")+(p.sources?`<b>Sources:</b><br>${p.sources.map(u=>{const t=(p.source_times||[]).find(x=>x.url==u);return lk(u)+(t?` <span class="mut">${t.time_utc?esc(t.time_utc.slice(0,16).replace("T"," "))+" UTC":"time not available"}</span>`:"")+(u==p.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")||"none listed"}<br>`:"")+
  `<b>Source:</b> <a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.source_name)} (original)</a></div>`;
 /* GeoTIFF upload: parsed and reprojected in the browser, nothing leaves the device */
 const RL=[];

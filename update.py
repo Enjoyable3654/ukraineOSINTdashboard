@@ -577,6 +577,31 @@ def put_in_place(args, data, day, sid, filename, features=None, content=None):
     return final_path
 
 
+def source_time(url, known):
+    """When a linked post was published (UTC, ISO text), and how we know; derived, never altering the link.
+    X/Twitter and TikTok post IDs contain their own timestamp; a public Telegram post's page shows its time
+    (one request, 1 s pause, remembered via `known`); others (e.g. Facebook, which needs a login) give none."""
+    if url in known:
+        return known[url]
+    t, how = None, "not available from this site"
+    try:
+        if m := re.search(r"(?:twitter|x)\.com/[^/]+/status(?:es)?/(\d+)", url):
+            t, how = dt.datetime.fromtimestamp(((int(m.group(1)) >> 22) + 1288834974657) / 1000, dt.timezone.utc), "from the X post ID"
+        elif m := re.search(r"tiktok\.com/@[^/]+/video/(\d+)", url):
+            t, how = dt.datetime.fromtimestamp(int(m.group(1)) >> 32, dt.timezone.utc), "from the TikTok video ID"
+        elif m := re.search(r"t\.me/(?:s/)?([A-Za-z0-9_]{4,})/(\d+)", url):
+            time.sleep(1)
+            page = fetch(f"https://t.me/{m.group(1)}/{m.group(2)}?embed=1&mode=tme", "text/html").decode("utf-8", "replace")
+            if d := re.search(r'<time[^>]*datetime="([^"]+)"', page):
+                t, how = dt.datetime.fromisoformat(d.group(1)).astimezone(dt.timezone.utc), "from the Telegram post page"
+            else:
+                how = "Telegram page shows no time (post deleted or private?)"
+    except Exception as e:
+        how = f"could not be read ({str(e)[:60]})"
+    known[url] = {"url": url, "time_utc": t.isoformat(timespec="seconds") if t else None, "how": how}
+    return known[url]
+
+
 def run_geoconfirmed(sid, cfg, args, day, now, data):
     """GeoConfirmed's geolocated events, saved as map points in each event's own date folder.
     Fields are copied as GeoConfirmed gives them (category = GeoConfirmed's icon name). Events with no date
@@ -595,6 +620,10 @@ def run_geoconfirmed(sid, cfg, args, day, now, data):
     icon_name = {i["icon"]: i["name"] for f in icons for i in f["icons"]}
     side_color = {f["name"]: f["color"] for f in icons}
     links = lambda t: re.findall(r"https?://[^\s,]+", t or "")
+    # posting times of linked sources, remembered from earlier runs so each Telegram page is read only once
+    known = {x["url"]: x for f in data.glob(f"*/{sid}/{KIND_FILENAMES[cfg['kind']]}")
+             for e in read_json(f, {"features": []})["features"] for x in e["properties"].get("source_times", [])
+             if not x["how"].startswith("could not")}
     by_day, undated, no_category = collections.defaultdict(list), 0, 0
     for r in rows:
         d = (r.get("Date") or "")[:10]
@@ -613,6 +642,11 @@ def run_geoconfirmed(sid, cfg, args, day, now, data):
                 "color": side_color.get(r["Faction"], "#666666"), "description": r["Description"].strip(),
                 "orbat": [u.strip() for u in (r["OrbatUnits"] or r["Units"]).split("|") if u.strip()],
                 "geolocation": links(r["Geolocation"]), "sources": links(r["Source"])}})
+        p = by_day[d][-1]["properties"]
+        p["source_times"] = [source_time(u, known) for u in p["sources"]]
+        first = min((x for x in p["source_times"] if x["time_utc"]), key=lambda x: x["time_utc"], default=None)
+        if first:
+            p["earliest_source_utc"], p["earliest_source_url"] = first["time_utc"], first["url"]
     if args.inspect:
         print(f"{len(rows)} rows from {start} to {end}: {undated} undated; per day:", {d: len(v) for d, v in sorted(by_day.items())})
         print("Categories:", collections.Counter(f["properties"]["category"][:60] for v in by_day.values() for f in v).most_common())
