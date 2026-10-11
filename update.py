@@ -221,6 +221,7 @@ SOURCES = {
         "post_sources": ["ua_mod", "ru_mod"],
         "lookback_days": 3,
         "batch": 15,
+        "prompt_version": 2,   # raise when the instructions change: saved answers from older instructions are re-asked
         "model": "gemini-3.8-flash",
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         "generation": {"maxOutputTokens": 16000, "responseMimeType": "application/json"},
@@ -230,8 +231,10 @@ SOURCES = {
             "claim give: category (exactly one of the categories listed below); claim (one English sentence that attributes it, "
             "e.g. 'Russian MoD claims its forces captured Novoselivka'); claimant_side ('Ukraine' or 'Russia'); target_side; "
             "places: the most specific places named, as objects {name_en, name_uk (the Ukrainian-language name for places in "
-            "Ukraine, else null), oblast_or_region (English), country}; approx_lat and approx_lon: your best estimate of the "
-            "coordinates ONLY for places outside Ukraine or well-known facilities, else null; date: YYYY-MM-DD if the post says "
+            "Ukraine, else null), oblast_or_region (English), country}; approx_lat and approx_lon: ALWAYS your best estimate "
+            "of where the claimed action took place (the named place; if none is named, infer it from context such as the "
+            "regions listed, the unit's usual area of operations or the target); location_basis: a few words on how you "
+            "estimated it (e.g. 'named village', 'centre of the regions listed', 'unit's usual area'); date: YYYY-MM-DD if the post says "
             "when it happened, else null. Never name private individuals. Answer with JSON only: "
             '{"results":[{"post":"<post id as given>","claims":[...]}]} with one entry per post, in the given order, '
             "including posts with no military claims (empty claims list)."),
@@ -1039,15 +1042,20 @@ def run_event_builder(sid, cfg, args, day, now, data):
     for q in places:
         by_name[norm(q[0])].append(q)
         by_name[norm(q[1])].append(q)
-        by_obl[norm(q[4])[:5]].append(q)
+        by_obl[norm(q[4])].append(q)
     obl_mid = {k: (sum(x[5] for x in v) / len(v), sum(x[6] for x in v) / len(v)) for k, v in by_obl.items()}
+
+    def obl(t):   # English oblast name (Sumy, Sumy Oblast, Crimea) -> OCHA oblast key (sumska), or None
+        t = norm(t).replace("oblast", "").replace("region", "")
+        t = {"chernivtsi": "chernivetska", "rivne": "rivnenska", "crimea": "autonomousrepublicofcrimea"}.get(t, t)
+        return next((k for k in sorted(by_obl, key=len) if t and (t == k or t.startswith(re.sub("s?ka$", "", k)))), None)
 
     def locate(c):
         pls = [x for x in c.get("places") or [] if isinstance(x, dict)]
         for pl in pls:
             cands = by_name.get(norm(pl.get("name_uk")), []) or by_name.get(norm(pl.get("name_en")), [])
-            o = norm(pl.get("oblast_or_region"))[:5]
-            cands = [q for q in cands if norm(q[4])[:5] == o] or cands
+            o = obl(pl.get("oblast_or_region"))
+            cands = [q for q in cands if norm(q[4]) == o] or cands
             if cands:
                 q = min(cands, key=lambda q: {"City": 0, "Settlement": 1}.get(q[2], 2))
                 many = " (name matches several places)" if len({(x[3], x[4]) for x in cands}) > 1 else ""
@@ -1055,11 +1063,11 @@ def run_event_builder(sid, cfg, args, day, now, data):
         if c.get("approx_lat") is not None and c.get("approx_lon") is not None and any(norm(pl.get("country")) not in ("", "ukraine") for pl in pls):
             return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", ", ".join(str(pl.get("name_en")) for pl in pls)
         for pl in pls:
-            o = norm(pl.get("oblast_or_region"))[:5]
-            if o in obl_mid:
+            o = obl(pl.get("oblast_or_region"))
+            if o:
                 return [obl_mid[o][1], obl_mid[o][0]], "oblast only", str(pl.get("oblast_or_region"))
         if c.get("approx_lat") is not None and c.get("approx_lon") is not None:
-            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", ", ".join(str(pl.get("name_en")) for pl in pls)
+            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", c.get("location_basis") or ", ".join(str(pl.get("name_en")) for pl in pls)
         return None, "no location", ""
 
     lvl, rules = cfg["confidence_from_evidence"], [(re.compile(r), c) for r, c in cfg["geoconfirmed_categories"]]
@@ -1187,7 +1195,7 @@ def run_claim_parser(sid, cfg, args, day, now, data):
         for src in cfg["post_sources"]:
             for x in read_json(data / d / src / "posts/posts.geojson", {"features": []})["features"]:
                 p = x["properties"]
-                if f"{src}:{p['id']}" not in done[d]:
+                if done[d].get(f"{src}:{p['id']}", {}).get("prompt") != cfg["prompt_version"]:
                     todo.append((d, f"{src}:{p['id']}", p))
     failed, n_claims = 0, 0
     for i in range(0, len(todo), cfg["batch"]):
@@ -1207,7 +1215,7 @@ def run_claim_parser(sid, cfg, args, day, now, data):
             claims = [c for c in res[k] if isinstance(c, dict) and c.get("claim")]
             for c in claims:
                 c["category"] = c.get("category") if c.get("category") in CLAIM_CATEGORIES else "Other military"
-            done[d][k] = {"claims": claims, "model": cfg["model"]}
+            done[d][k] = {"claims": claims, "model": cfg["model"], "prompt": cfg["prompt_version"]}
             n_claims += len(claims)
     for d in days:
         if done[d]:
