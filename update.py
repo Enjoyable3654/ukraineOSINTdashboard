@@ -68,6 +68,13 @@ POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one i
     "unofficial_ru": "Unofficial Russian (milbloggers etc.)",
 }
 
+CLAIM_CATEGORIES = [   # every claim gets exactly one; edit freely (the Events panel's category filter uses this list)
+    "Ground assault / offensive action", "Territorial claim (captured / liberated)", "Equipment loss",
+    "Casualties (aggregate only)", "Long-range drone strike", "Missile strike", "Artillery / shelling",
+    "Air strike / glide bombs", "Air-defence interception", "Naval action", "Infrastructure strike",
+    "Sabotage / partisan action", "Cross-border raid", "Other military",
+]
+
 SOURCES = {
     "deepstate": {
         "enabled": True,
@@ -204,14 +211,57 @@ SOURCES = {
     # Events (derived): groups claims from all sources that describe the same thing into one event with its own ID,
     # listing every source (claim) separately. Phase 1 matches only on shared post links (certain matches). Two
     # items from the same source are never merged; ambiguous links are kept as "possible matches" instead.
+    # Claims from text posts (derived, AI): Gemini reads each ministry post once and lists every military claim in it
+    # (category, one-sentence claim, sides, places, when). Results are kept per post, so a post is never paid for twice.
+    "post_claims": {
+        "enabled": True,
+        "kind": "claim_parser",
+        "name": "Claims parsed from posts (Gemini)",
+        "url": "https://ai.google.dev/gemini-api",
+        "post_sources": ["ua_mod", "ru_mod"],
+        "lookback_days": 3,
+        "batch": 15,
+        "model": "gemini-3.8-flash",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        "generation": {"maxOutputTokens": 16000, "responseMimeType": "application/json"},
+        "instructions": (
+            "You read Telegram posts by the Ukrainian or Russian Ministry of Defence and list every distinct MILITARY claim in "
+            "each post. Ignore political, diplomatic, ceremonial, recruitment, awards and other non-military content. For each "
+            "claim give: category (exactly one of the categories listed below); claim (one English sentence that attributes it, "
+            "e.g. 'Russian MoD claims its forces captured Novoselivka'); claimant_side ('Ukraine' or 'Russia'); target_side; "
+            "places: the most specific places named, as objects {name_en, name_uk (the Ukrainian-language name for places in "
+            "Ukraine, else null), oblast_or_region (English), country}; approx_lat and approx_lon: your best estimate of the "
+            "coordinates ONLY for places outside Ukraine or well-known facilities, else null; date: YYYY-MM-DD if the post says "
+            "when it happened, else null. Never name private individuals. Answer with JSON only: "
+            '{"results":[{"post":"<post id as given>","claims":[...]}]} with one entry per post, in the given order, '
+            "including posts with no military claims (empty claims list)."),
+    },
+    # Events (derived): every claim (GeoConfirmed items and claims parsed from posts) with category, confidence and
+    # location; claims that cite the same post are grouped into one event listing every source. Two claims from the same
+    # source are never merged; ambiguous links are kept as "possible matches".
     "events": {
         "enabled": True,
         "kind": "event_builder",
-        "name": "Events (combined)",
+        "name": "Events",
         "url": "https://github.com/Enjoyable3654/ukraineOSINTdashboard",
-        # how each source's claims are described; the first listed source with a location gives the event's place
-        "verification": {"geoconfirmed": "geolocated by GeoConfirmed", "warspotting": "visually confirmed loss (WarSpotting)",
-                         "lost_warinua": "claimed by Telegram channel", "ua_mod": "official claim", "ru_mod": "official claim"},
+        "claim_sources": ["geoconfirmed", "post_claims"],
+        # GeoConfirmed icon name -> claim category (first matching pattern wins; lower-case regular expressions)
+        "geoconfirmed_categories": [
+            ["interception|^(recently|older).*(intercepted|crashed)", "Air-defence interception"],
+            ["^(?!recently|older).*(longe? range|loitering)", "Long-range drone strike"],
+            ["^(?!recently|older).*cruise missile", "Missile strike"],
+            ["shelling", "Artillery / shelling"],
+            ["close fighting", "Ground assault / offensive action"],
+            ["ship|boat|submarine|harbor", "Naval action"],
+            ["infrast|brigde|bridge|airport|train|tunnel|nucl", "Infrastructure strike"],
+            ["kia|wia|pow|killed or wounded", "Casualties (aggregate only)"],
+            ["^(recently|older)", "Equipment loss"],
+            ["owad|bomber drone|ugv|fpv", "Ground assault / offensive action"],
+            [".", "Other military"],
+        ],
+        # Fixed confidence rules: evidence sets a starting level; independent sources reporting the same event raise it
+        "confidence_from_evidence": {"geolocated footage": 2, "video in the post": 1, "photo in the post": 1, "text only": 0},
+        "levels": ["low", "medium", "high"],
     },
     # Place and region statistics (derived): runs after all sources and before the summary. Uses OCHA's boundaries
     # in ref/ (raions and settlement outlines). For each day of the window: (a) settlements inside each change patch,
@@ -787,13 +837,14 @@ COORDS = r"(-?\d{1,2}\.\d{2,})\s*,\s*(-?\d{1,3}\.\d{2,})"
 
 
 def telegram_posts(page, channel):
-    """(post number, publish time, message HTML) for each post on a t.me/s/<channel> page."""
+    """(post number, publish time, message HTML, attached media types) for each post on a t.me/s/<channel> page."""
     for b in re.split(r'(?=<div class="tgme_widget_message_wrap)', page)[1:]:
         m = re.search(rf'data-post="{channel}/(\d+)"', b)
         t = re.search(r'<time datetime="([^"]+)"', b)
         x = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', b, re.S)
         if m and t and x:
-            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1)
+            media = [k for k, pat in (("video", "message_video|roundvideo"), ("photo", "message_photo")) if re.search(pat, b)]
+            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1), media
 
 
 def telegram_recent(cfg, cutoff):
@@ -803,9 +854,9 @@ def telegram_recent(cfg, cutoff):
         posts = list(telegram_posts(fetch(url, "text/html").decode("utf-8"), cfg["channel"]))
         time.sleep(2)
         yield from (p for p in posts if p[1] >= cutoff)
-        if not posts or min(w for _, w, _ in posts) < cutoff:
+        if not posts or min(p[1] for p in posts) < cutoff:
             return
-        url = f"{cfg['url']}?before={min(p for p, _, _ in posts)}"
+        url = f"{cfg['url']}?before={min(p[0] for p in posts)}"
 
 
 def telegram_lines_links(body):
@@ -820,12 +871,12 @@ def run_telegram_posts(sid, cfg, args, day, now, data):
     Merged by post number, so a post read on two runs is saved once."""
     cutoff, found, n = now - dt.timedelta(days=cfg["lookback_days"]), collections.defaultdict(dict), 0
     try:
-        for pid, when, body in telegram_recent(cfg, cutoff):
+        for pid, when, body, media in telegram_recent(cfg, cutoff):
             lines, links = telegram_lines_links(body)
             n += 1
             found[when.date().isoformat()][pid] = {"type": "Feature", "geometry": None, "properties": {
                 "source": sid, "source_name": cfg["name"], "group": cfg["group"], "id": pid, "posted_utc": when.isoformat(),
-                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "original_html": body}}
+                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "media": media, "original_html": body}}
     except Exception as e:
         raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
@@ -840,7 +891,7 @@ def run_telegram(sid, cfg, args, day, now, data):
     ch, cutoff = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"])
     found, n_posts, no_date = collections.defaultdict(dict), 0, 0
     try:
-        for pid, when, body in telegram_recent(cfg, cutoff):
+        for pid, when, body, media in telegram_recent(cfg, cutoff):
             n_posts += 1
             lines, links = telegram_lines_links(body)
             m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
@@ -976,82 +1027,119 @@ def post_key(url):
 
 
 def run_event_builder(sid, cfg, args, day, now, data):
-    """Rebuild all events from every saved claim (point items and posts) on every day. Claims sharing a link to the
-    same specific post are grouped, strongest links first, never putting two claims from the same source together;
-    links that would need that are kept as possible matches. Groups with a location become events, filed under the
-    earliest date its claims give for when it happened; an event's ID comes from its earliest claim, so it stays stable."""
+    """Rebuild all events from every claim: GeoConfirmed items (category by rules, geolocated) and claims parsed from posts
+    (located by OCHA place names, else the oblast, else Gemini's estimate). Claims citing the same specific post are
+    grouped (strongest links first, never two claims of one source). Confidence starts from the evidence and rises one
+    level when several independent sources report the event. Each event is filed under the date it happened."""
+    places = read_json(REF / "places.json.gz", [])
+    norm = lambda t: re.sub(r"[\s'’ʼ`.-]", "", str(t or "").lower())
+    by_name, by_obl = collections.defaultdict(list), collections.defaultdict(list)
+    for q in places:
+        by_name[norm(q[0])].append(q)
+        by_name[norm(q[1])].append(q)
+        by_obl[norm(q[4])[:5]].append(q)
+    obl_mid = {k: (sum(x[5] for x in v) / len(v), sum(x[6] for x in v) / len(v)) for k, v in by_obl.items()}
+
+    def locate(c):
+        pls = [x for x in c.get("places") or [] if isinstance(x, dict)]
+        for pl in pls:
+            cands = by_name.get(norm(pl.get("name_uk")), []) or by_name.get(norm(pl.get("name_en")), [])
+            o = norm(pl.get("oblast_or_region"))[:5]
+            cands = [q for q in cands if norm(q[4])[:5] == o] or cands
+            if cands:
+                q = min(cands, key=lambda q: {"City": 0, "Settlement": 1}.get(q[2], 2))
+                many = " (name matches several places)" if len({(x[3], x[4]) for x in cands}) > 1 else ""
+                return [q[6], q[5]], "settlement" + many, f"{q[0]} ({q[2]}, {q[3]} raion, {q[4]})"
+        if c.get("approx_lat") is not None and c.get("approx_lon") is not None and any(norm(pl.get("country")) not in ("", "ukraine") for pl in pls):
+            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", ", ".join(str(pl.get("name_en")) for pl in pls)
+        for pl in pls:
+            o = norm(pl.get("oblast_or_region"))[:5]
+            if o in obl_mid:
+                return [obl_mid[o][1], obl_mid[o][0]], "oblast only", str(pl.get("oblast_or_region"))
+        if c.get("approx_lat") is not None and c.get("approx_lon") is not None:
+            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", ", ".join(str(pl.get("name_en")) for pl in pls)
+        return None, "no location", ""
+
+    lvl, rules = cfg["confidence_from_evidence"], [(re.compile(r), c) for r, c in cfg["geoconfirmed_categories"]]
     claims = {}
-    for f in sorted(data.glob("*/*/points/events.geojson")) + sorted(data.glob("*/*/posts/posts.geojson")):
-        src = f.parent.parent.name
-        if src == sid:
-            continue
+    for f in sorted(data.glob("*/geoconfirmed/points/events.geojson")):
         for x in read_json(f, {"features": []})["features"]:
             p = x["properties"]
-            own = [p.get("link")] + p.get("sources", []) + p.get("links", [])
-            when = p.get("posted_utc") or p.get("earliest_source_utc") or (p.get("date") or f.parent.parent.parent.name) + "T23:59:59"
-            claims[f"{src}:{p['id']}"] = {"src": src, "x": x, "when": when, "keys": {k for k in map(post_key, filter(None, own)) if k}}
+            claims[f"geoconfirmed:{p['id']}"] = {"source": "geoconfirmed", "source_name": p["source_name"], "kind": "geolocated database",
+                "category": next(c for r, c in rules if r.search((p.get("category") or "").lower())), "claim": p.get("description") or p.get("category"),
+                "source_category": p.get("category"), "side": p.get("side"), "color": p.get("color"), "date": p["date"],
+                "time_utc": p.get("earliest_source_utc"), "coords": x["geometry"]["coordinates"], "precision": "geolocated", "place": "",
+                "evidence": "geolocated footage", "link": p.get("link"), "sources": p.get("sources", []), "source_times": p.get("source_times"),
+                "earliest_source_url": p.get("earliest_source_url"), "geolocation": p.get("geolocation"), "orbat": p.get("orbat", []),
+                "keys": {k for k in map(post_key, [p.get("link")] + p.get("sources", [])) if k}}
+    posts = {f"{f.parent.parent.name}:{x['properties']['id']}": x["properties"]
+             for f in sorted(data.glob("*/*/posts/posts.geojson")) for x in read_json(f, {"features": []})["features"]}
+    for f in sorted(data.glob("*/post_claims/claims/claims.json")):
+        for k, r in read_json(f, {"posts": {}})["posts"].items():
+            p = posts.get(k)
+            if not p:
+                continue
+            media = p.get("media") or []
+            ev = "video in the post" if "video" in media else "photo in the post" if "photo" in media else "text only"
+            for i, c in enumerate(r["claims"]):
+                coords, prec, place = locate(c)
+                side = str(c.get("claimant_side") or "")
+                claims[f"{k}#{i}"] = {"source": k.split(":")[0], "source_name": p["source_name"], "kind": "official claim",
+                    "category": c["category"], "claim": c["claim"], "side": f"{side} (official)",
+                    "color": "#0051CA" if side.lower().startswith("ukr") else "#E00000" if side.lower().startswith("rus") else "#666666",
+                    "date": (c.get("date") or p["posted_utc"])[:10], "time_utc": p["posted_utc"], "coords": coords, "precision": prec,
+                    "place": place, "evidence": ev, "link": p["link"], "sources": [u for u in p.get("links", []) if post_key(u)],
+                    "post_text": p["text"], "keys": {k2 for k2 in map(post_key, [p["link"]] + p.get("links", [])) if k2}}
     by_key = collections.defaultdict(list)
     for c, v in claims.items():
         for k in v["keys"]:
             by_key[k].append(c)
-    pairs = collections.Counter()   # (claim a, claim b) -> number of shared post links
-    possible = collections.defaultdict(set)
+    pairs, possible = collections.Counter(), collections.defaultdict(set)
     for k, cs in by_key.items():
-        per_src = collections.Counter(claims[c]["src"] for c in cs)
+        per_src = collections.Counter(claims[c]["source"] for c in cs)
         for i, a in enumerate(cs):
             for b in cs[i + 1:]:
-                if claims[a]["src"] == claims[b]["src"]:
+                if claims[a]["source"] == claims[b]["source"]:
                     continue
-                if per_src[claims[a]["src"]] > 1 or per_src[claims[b]["src"]] > 1:
-                    possible[a].add(b)   # one post behind several items of a source (e.g. one video, several vehicles): ambiguous
+                if per_src[claims[a]["source"]] > 1 or per_src[claims[b]["source"]] > 1:
+                    possible[a].add(b)   # one post behind several claims of a source: ambiguous, keep apart
                     possible[b].add(a)
                 else:
                     pairs[tuple(sorted((a, b)))] += 1
     group = {c: {c} for c in claims}
     for (a, b), n in sorted(pairs.items(), key=lambda kv: -kv[1]):
         ga, gb = group[a], group[b]
-        if ga is gb:
-            continue
-        if {claims[c]["src"] for c in ga} & {claims[c]["src"] for c in gb}:
-            possible[a].add(b)   # would put two items of one source together: keep apart, note it
-            possible[b].add(a)
+        if ga is gb or {claims[c]["source"] for c in ga} & {claims[c]["source"] for c in gb}:
             continue
         ga |= gb
         for c in gb:
             group[c] = ga
-    order = list(cfg["verification"])
-    events, seen = collections.defaultdict(list), set()
+    rank = lambda c: (0 if c["precision"] == "geolocated" else 1 if c["precision"].startswith("settlement") else 2 if c["precision"] == "oblast only"
+                      else 3 if c["coords"] else 4, -lvl[c["evidence"]])
+    events = collections.defaultdict(list)
     for g in {id(g): g for g in group.values()}.values():
-        located = [c for c in g if claims[c]["x"].get("geometry")]
-        if not located:
-            continue   # posts with no located partner stay in the Posts panel only
-        members = sorted(g, key=lambda c: (claims[c]["when"], c))
-        lead = min(located, key=lambda c: (order.index(claims[c]["src"]) if claims[c]["src"] in order else 99, claims[c]["when"]))
-        lp = claims[lead]["x"]["properties"]
-        eid = "ev-" + hashlib.sha1(members[0].encode()).hexdigest()[:10]
-        d = min((claims[c]["x"]["properties"].get("date") or claims[c]["when"])[:10] for c in members)   # when it happened, not when reported
-        lst = []
-        for c in members:
-            p = claims[c]["x"]["properties"]
-            lst.append({"key": c, "source": claims[c]["src"], "source_name": p.get("source_name"), "verification": cfg["verification"].get(claims[c]["src"], "claim"),
-                        "time_utc": p.get("posted_utc") or p.get("earliest_source_utc"), "date": p.get("date") or claims[c]["when"][:10],
-                        "side": p.get("side"), "category": p.get("category"), "description": p.get("description") or p.get("text"),
-                        "orbat": p.get("orbat", []), "geolocation": p.get("geolocation"), "sources": p.get("sources") or p.get("links") or [],
-                        "source_times": p.get("source_times"), "earliest_source_url": p.get("earliest_source_url"), "link": p.get("link"),
-                        "date_note": p.get("date_note"), "located": bool(claims[c]["x"].get("geometry"))})
-        shared = sorted({k for c in members for k in claims[c]["keys"]} & {k for k, cs in by_key.items() if len({claims[x]["src"] for x in cs if x in g}) > 1})
-        events[d].append({"type": "Feature", "geometry": claims[lead]["x"]["geometry"], "properties": {
-            "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": eid, "date": d,
-            "time_utc": next((x["time_utc"] for x in lst if x["time_utc"]), None), "category": lp.get("category"),
-            "side": lp.get("side"), "color": lp.get("color"), "description": lp.get("description"), "location_from": lead,
-            "claim_sources": sorted({x["source"] for x in lst}), "claims": lst, "matched_by": shared,
+        members = sorted(g, key=lambda c: (claims[c]["time_utc"] or claims[c]["date"] + "T23:59", c))
+        lead = claims[min(members, key=lambda c: rank(claims[c]))]
+        srcs = {claims[c]["source"] for c in members}
+        level = max(lvl[claims[c]["evidence"]] for c in members)
+        reason = max((claims[c]["evidence"] for c in members), key=lambda e: lvl[e])
+        if len(srcs) > 1:
+            level, reason = min(2, level + 1), f"{reason}; reported by {len(srcs)} independent sources"
+        out = [{k: v for k, v in claims[c].items() if k != "keys"} | {"key": c} for c in members]
+        events[min(claims[c]["date"] for c in members)].append({"type": "Feature",
+            "geometry": {"type": "Point", "coordinates": lead["coords"]} if lead["coords"] else None, "properties": {
+            "source": sid, "source_name": cfg["name"], "id": "ev-" + hashlib.sha1(members[0].encode()).hexdigest()[:10],
+            "date": min(claims[c]["date"] for c in members), "time_utc": next((claims[c]["time_utc"] for c in members if claims[c]["time_utc"]), None),
+            "category": lead["category"], "categories": sorted({claims[c]["category"] for c in members}), "claim": lead["claim"],
+            "side": lead["side"], "color": lead["color"], "confidence": cfg["levels"][level], "confidence_reason": reason,
+            "location": "geolocated" if lead["precision"] == "geolocated" else "approximate" if lead["coords"] else "none",
+            "precision": lead["precision"], "place": lead["place"], "claim_sources": sorted(srcs), "claims": out,
             "possible_matches": sorted({o for c in members for o in possible.get(c, ())} - set(members))}})
     fn = KIND_FILENAMES[cfg["kind"]]
     for d, feats in sorted(events.items()):
         put_in_place(args, data, d, sid, fn, sorted(feats, key=lambda e: e["properties"]["id"]))
-        n_multi = sum(1 for e in feats if len(e["properties"]["claims"]) > 1)
         save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "files": [f"{sid}/{fn}"],
-                                 "events": len(feats), "multi_source_events": n_multi})
+                                 "events": len(feats), "by_confidence": dict(collections.Counter(e["properties"]["confidence"] for e in feats))})
     for m in data.glob("*/meta.json"):   # days that no longer have events: remove the old entry and file
         if m.parent.name not in events and sid in read_json(m, {"sources": {}})["sources"]:
             j = read_json(m, None)
@@ -1059,7 +1147,74 @@ def run_event_builder(sid, cfg, args, day, now, data):
             write_json(m, j)
             shutil.rmtree(m.parent / sid, ignore_errors=True)
     total = sum(len(v) for v in events.values())
-    print(f"[{sid}] {len(claims)} claims -> {total} events, {sum(1 for v in events.values() for e in v if len(e['properties']['claims']) > 1)} with several sources")
+    print(f"[{sid}] {len(claims)} claims -> {total} events ({sum(1 for v in events.values() for e in v if len(e['properties']['claims']) > 1)} with several sources)")
+
+
+def gemini(cfg, prompt, sid):
+    """One Gemini request; waits and retries when Gemini is busy (30 s, 1, 2, 4 min). Returns the reply text."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("no GEMINI_API_KEY secret is set")
+    req = urllib.request.Request(cfg["endpoint"].format(model=cfg["model"]), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": key, "User-Agent": USER_AGENT},
+        data=json.dumps({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg["generation"]}).encode())
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                out = json.loads(r.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 503) or attempt == 4:
+                raise RuntimeError(e.read().decode("utf-8", "replace")[:300])
+            print(f"[{sid}] Gemini busy ({e.code}), retrying in {30 * 2 ** attempt} s", file=sys.stderr)
+            time.sleep(30 * 2 ** attempt)
+    text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
+    if not text:
+        raise RuntimeError(f"Gemini returned no text ({out['candidates'][0].get('finishReason')})")
+    return text
+
+
+def run_claim_parser(sid, cfg, args, day, now, data):
+    """Military claims from the posts of the last few days, parsed by Gemini in batches. Each post is parsed once; its
+    result is kept in data/<day>/<sid>/claims/claims.json. Posts that fail are retried on the next run."""
+    end, fn = dt.date.fromisoformat(day), KIND_FILENAMES[cfg["kind"]]
+    days = [(end - dt.timedelta(n)).isoformat() for n in range(0 if args.date else cfg["lookback_days"], -1, -1)]
+    done = {d: read_json(data / d / sid / fn, {"posts": {}})["posts"] for d in days}
+    todo = []
+    for d in days:
+        for src in cfg["post_sources"]:
+            for x in read_json(data / d / src / "posts/posts.geojson", {"features": []})["features"]:
+                p = x["properties"]
+                if f"{src}:{p['id']}" not in done[d]:
+                    todo.append((d, f"{src}:{p['id']}", p))
+    failed, n_claims = 0, 0
+    for i in range(0, len(todo), cfg["batch"]):
+        batch = todo[i:i + cfg["batch"]]
+        posts = [{"post": k, "channel": p["source_name"], "posted_utc": p["posted_utc"], "text": p["text"][:4000]} for _, k, p in batch]
+        prompt = f"{cfg['instructions']}\n\nCategories: {json.dumps(CLAIM_CATEGORIES)}\n\nPosts:\n{json.dumps(posts, ensure_ascii=False)}"
+        try:
+            res = {r["post"]: r.get("claims") or [] for r in json.loads(gemini(cfg, prompt, sid))["results"]}
+        except Exception as e:
+            failed += len(batch)
+            print(f"[{sid}] batch of {len(batch)} posts failed (will retry next run): {str(e)[:200]}", file=sys.stderr)
+            continue
+        for d, k, p in batch:
+            if k not in res:
+                failed += 1
+                continue
+            claims = [c for c in res[k] if isinstance(c, dict) and c.get("claim")]
+            for c in claims:
+                c["category"] = c.get("category") if c.get("category") in CLAIM_CATEGORIES else "Other military"
+            done[d][k] = {"claims": claims, "model": cfg["model"]}
+            n_claims += len(claims)
+    for d in days:
+        if done[d]:
+            put_in_place(args, data, d, sid, fn, content=json.dumps({"posts": done[d]}, ensure_ascii=False, separators=(",", ":")).encode())
+            save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "files": [f"{sid}/{fn}"],
+                                     "posts_parsed": len(done[d]), "model": cfg["model"]})
+    print(f"[{sid}] {len(todo) - failed} new posts parsed into {n_claims} claims; {failed} to retry next run")
+    if failed and failed == len(todo):
+        raise SourceError(f"all {failed} posts failed to parse")
 
 
 def run_llm_summary(sid, cfg, args, day, now, data):
@@ -1102,30 +1257,11 @@ def run_llm_summary(sid, cfg, args, day, now, data):
                          + (f"; settlements where both agree: {', '.join(v['places_both'][:25])}" if v["places_both"] else ""))
     material = "\n".join(lines)[:cfg["max_input_chars"]]
     try:
-        key = os.environ.get("GEMINI_API_KEY")
-        if not key:
-            raise RuntimeError("no GEMINI_API_KEY secret is set")
         if not lines:
             raise RuntimeError(f"nothing saved for {d} to summarise")
-        req = urllib.request.Request(cfg["endpoint"].format(model=cfg["model"]), method="POST",
-            headers={"Content-Type": "application/json", "x-goog-api-key": key, "User-Agent": USER_AGENT},
-            data=json.dumps({"contents": [{"parts": [{"text": f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}"}]}],
-                             "generationConfig": cfg["generation"]}).encode())
-        for attempt in range(5):   # "busy"/"too many requests" replies are usually brief: wait 30 s, 1, 2, 4 min
-            try:
-                with urllib.request.urlopen(req, timeout=300) as r:
-                    out = json.loads(r.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as e:
-                if e.code not in (429, 500, 503) or attempt == 4:
-                    raise
-                print(f"[{sid}] Gemini busy ({e.code}), retrying in {30 * 2 ** attempt} s", file=sys.stderr)
-                time.sleep(30 * 2 ** attempt)
-        text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
-        if not text:
-            raise RuntimeError(f"Gemini returned no text ({out['candidates'][0].get('finishReason')})")
+        text = gemini(cfg, f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}", sid)
     except Exception as e:
-        msg = getattr(e, "read", None) and e.read().decode("utf-8", "replace")[:300] or str(e)
+        msg = str(e)
         save_meta(data, d, sid, {"status": "error", "error": f"Summary could not be generated: {msg}",
                                  "at_utc": now.isoformat(timespec="seconds")})
         raise SourceError(f"{d}: {msg}")
@@ -1178,7 +1314,7 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
          "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires,
          "telegram_posts": run_telegram_posts, "llm_summary": run_llm_summary,
-         "geo_analysis": run_geo_analysis,
+         "geo_analysis": run_geo_analysis, "claim_parser": run_claim_parser,
          "event_builder": run_event_builder}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
@@ -1187,7 +1323,7 @@ KIND_FILENAMES = {"occupation": "polygons/occupation.geojson.gz", "kmz_layers": 
                   "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson.gz",
                   "telegram_posts": "posts/posts.geojson", "llm_summary": "text/summary.json",
                   "geo_analysis": "stats/facts.json",
-                  "event_builder": "points/events.geojson"}
+                  "event_builder": "points/events.geojson", "claim_parser": "claims/claims.json"}
 
 
 def build_reference(src):
@@ -1255,7 +1391,7 @@ def main():
     if worked and not args.inspect:
         write_json(data / "categories.json", {"categories": CATEGORIES})
         # the map shows one checkbox per source listed here (the Posts tab: those with a "group"), even on empty days
-        write_json(data / "sources.json", {"post_groups": POST_GROUPS, "sources": {
+        write_json(data / "sources.json", {"post_groups": POST_GROUPS, "claim_categories": CLAIM_CATEGORIES, "sources": {
             k: {"name": v["name"], "url": v["url"], **({"group": v["group"]} if "group" in v else {})}
             for k, v in SOURCES.items() if v.get("enabled", True)}})
         # A day "has data" once at least one source folder exists under it (a source only gets a

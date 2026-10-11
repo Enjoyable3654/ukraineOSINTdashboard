@@ -52,6 +52,7 @@ body.pan #map{right:460px}body.pan #rt{right:470px}
 .ly{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 .fi{width:100%;padding:6px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--card)}
+.dd{margin:6px 0}.dd summary{display:inline-block;list-style:none}.ddl{padding:8px;margin:4px 0;max-height:50vh;overflow:auto}
 .res button{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--bd);background:none;padding:6px 4px}
 /* Dark mode: darken only the OSM map images (areas and dots keep their colours); nothing extra is requested from OSM */
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.9)}}
@@ -84,8 +85,8 @@ body.pan #map{right:460px}body.pan #rt{right:470px}
   <div id="gs" class="mut" style="margin-top:4px">Files are read in your browser and never uploaded. You can also drop them on the map.</div><div id="lyrs"></div>
  </div>
 </div>
-<div id="rt" class="ov"><button class="btn" data-panel="post">Posts</button><button class="btn" data-panel="feat">Features</button></div>
-<aside id="panel" class="ov" hidden><div id="pp" class="pb" hidden></div><div id="pf" class="pb" hidden></div></aside>
+<div id="rt" class="ov"><button class="btn" data-panel="ev">Events</button></div>
+<aside id="panel" class="ov" hidden><div id="pe" class="pb"></div></aside>
 <p id="tn" class="ov" hidden></p>
 <script>
 const $=s=>document.querySelector(s);
@@ -109,13 +110,11 @@ else{const tl=L.tileLayer(BASE.url,{maxZoom:19,attribution:BASE.attr,referrerPol
 const now=new Date();let sel=key(now),view=[now.getUTCFullYear(),now.getUTCMonth()];
 /* left dropdowns (calendar, search results, summary, layers): one open at a time */
 const DROPS=["calbox","sres","sumbox","lay"],drop=id=>DROPS.forEach(d=>$("#"+d).hidden=d!==id||!$("#"+d).hidden);
-/* right panels (posts, features): one open at a time; each remembers where you had scrolled */
-let panel=null;const scr={};
-const showPanel=p=>{if(panel)scr[panel]=$(panel=="post"?"#pp":"#pf").scrollTop;panel=p===panel?null:p;
- $("#panel").hidden=!panel;$("#pp").hidden=panel!="post";$("#pf").hidden=panel!="feat";
+/* right panel (events): opening it squeezes the map; it keeps its scroll position while hidden */
+let panel=null;
+const showPanel=p=>{panel=p===panel?null:p;$("#panel").hidden=!panel;
  document.body.classList.toggle("pan",!!panel);map.invalidateSize();
- document.querySelectorAll("[data-panel]").forEach(b=>b.classList.toggle("on",b.dataset.panel==panel));
- if(panel)$(panel=="post"?"#pp":"#pf").scrollTop=scr[panel]||0};
+ document.querySelectorAll("[data-panel]").forEach(b=>b.classList.toggle("on",b.dataset.panel==panel))};
 function cal(){
  const[y,m]=view,f=new Date(Date.UTC(y,m,1)),off=(f.getUTCDay()+6)%7,n=new Date(Date.UTC(y,m+1,0)).getUTCDate();
  let h=`<div class="ch"><button data-m="-1" aria-label="Previous month">‹</button><b>${f.toLocaleString("en",{month:"long",year:"numeric",timeZone:"UTC"})}</b><button data-m="1" aria-label="Next month">›</button></div><div class="cg">`+"MTWTFSS".split("").map(d=>`<i>${d}</i>`).join("")+"<span></span>".repeat(off);
@@ -127,11 +126,12 @@ function render(){
  $("#dbtn").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"short",day:"numeric",month:"short",year:"numeric",timeZone:"UTC"})+" ▾";
  if(occFor!==sel){occFor=sel;loadOcc()}}
 document.addEventListener("click",e=>{
- const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl]");if(!b)return;
+ const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all]");if(!b)return;
  const d=b.dataset;
  if(d.drop)return drop(d.drop);
  if(d.panel)return showPanel(d.panel);
- if(d.go)return goFeat(+d.go);
+ if(d.go)return goEv(+d.go);
+ if(d.all){CCAT.forEach(c=>eOn["cat|"+c]=d.all=="1");document.querySelectorAll('[data-ef^="cat|"]').forEach(i=>i.checked=d.all=="1");$("#ncat").textContent=ncat();return listEv()}
  if(d.pl)return goPlace(+d.pl);
  if(d.m){const t=new Date(Date.UTC(view[0],view[1]+ +d.m,1));view=[t.getUTCFullYear(),t.getUTCMonth()]}
  else if(d.d){sel=d.d;drop(null)}
@@ -139,36 +139,35 @@ document.addEventListener("click",e=>{
  render()});
 document.addEventListener("keydown",e=>{if(e.key=="Escape"){drop(null);if(panel)showPanel(panel)}});
 document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}if(e.target.id=="cc"){incC=e.target.checked;drawOcc()}
- if(d.ff){fOn[d.ff]=e.target.checked;listFeat()}if(d.pg){pgOn[d.pg]=e.target.checked;drawPosts()}if(d.pc){pcOn[d.pc]=e.target.checked;drawPosts()}});
-document.addEventListener("input",e=>{if(e.target.id=="pq"){pq=e.target.value;listPosts()}if(e.target.id=="fq"){fq=e.target.value;listFeat()}if(e.target.id=="ps")findPlace(e.target.value)});
+ if(d.ef){eOn[d.ef]=e.target.checked;if(d.ef.startsWith("cat|"))$("#ncat").textContent=ncat();listEv()}});
+document.addEventListener("input",e=>{if(e.target.id=="eq"){eq=e.target.value;listEv()}if(e.target.id=="ps")findPlace(e.target.value)});
 
 /* Map data from data/<date>/<source>/..., built by the daily job */
 map.createPane("occ").style.zIndex=450;
-const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let OCC=null,CATS={},SRCS={},PG={},POSTS=[],FL=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",fq="",fOn={},occP="1d",META={},incC=true;
+const ol=L.layerGroup().addTo(map),evl=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let OCC=null,CATS={},SRCS={},CCAT=[],EV=[],EL=[],occOn={},occFor=null,eq="",eOn={},occP="1d",META={},incC=true;
 /* data files change daily: always ask GitHub whether there is a newer copy (fast "not modified" if not) */
 const get=u=>fetch(u,{cache:"no-cache"});
 /* big data files are stored gzip-compressed (lossless); the browser unpacks them here */
 const getJson=async u=>{const r=await get(u);if(!r.ok)throw Error(r.status);return u.endsWith(".gz")?new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).json():r.json()};
 async function loadOcc(){
- const day=sel;OCC=null;POSTS=[];META={};
+ const day=sel;OCC=null;EV=[];META={};
  try{
   if(!Object.keys(CATS).length)CATS=(await(await get("data/categories.json")).json()).categories;
-  if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;PG=j.post_groups||{}}
+  if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;CCAT=j.claim_categories||[]}
   const meta=await(await get(`data/${day}/meta.json`)).json();META=meta.sources||{};
-  /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson */
-  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/^(events\/points\/events|[^/]+\/points\/fires|[^/]+\/polygons\/(occupation|change_\w+))\.geojson(\.gz)?$/.test(f));
-  const pf=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>f.endsWith("/posts/posts.geojson"));
+  /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson; events are kept apart (some have no location) */
+  const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/^((events|warspotting|lost_warinua)\/points\/events|[^/]+\/points\/fires|[^/]+\/polygons\/(occupation|change_\w+))\.geojson(\.gz)?$/.test(f));
   files.sort((a,b)=>a.includes("/change_")-b.includes("/change_"));   /* change layers drawn on top */
-  const parts=await Promise.all(files.concat(pf).map(async f=>{
+  const parts=await Promise.all(files.map(async f=>{
    try{return(await getJson(`data/${day}/${f}`)).features}catch(e){return[]}
   }));
-  const all=parts.flat(),feats=all.filter(f=>f.geometry);
+  const all=parts.flat(),feats=all.filter(f=>f.geometry&&f.properties.source!="events");
   if(day!==sel)return;
-  POSTS=all.filter(f=>!f.geometry).map(f=>f.properties);
+  EV=all.filter(f=>f.properties.source=="events"&&f.properties.categories);   /* skips old-format event files until the job rebuilds them */
   OCC=feats.length?{type:"FeatureCollection",features:feats}:null
  }catch(e){}
- drawOcc();drawPosts();drawSum(day)}
+ drawOcc();drawEvPanel();drawSum(day)}
 /* Day summary: written by Gemini from that day's saved material, labelled as AI-written; errors are shown as they are */
 async function drawSum(day){
  const m=META.daily_summary,el=$("#sum");
@@ -178,10 +177,10 @@ async function drawSum(day){
   el.innerHTML=`<i>AI-written by ${esc(j.model)} from ${j.input_items} saved items; it can make mistakes, so check the sources.</i>\n\n`+esc(j.text).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/^#+ ?(.*)$/gm,"<b>$1</b>")}
  catch(e){el.textContent="The summary file could not be loaded."}}
 function drawOcc(){
- ol.clearLayers();FL=[];const st=$("#os"),oc=$("#oc");
+ ol.clearLayers();const st=$("#os"),oc=$("#oc");
  const fs=OCC?OCC.features:[],has=new Set(fs.map(f=>f.properties.source));
- /* every map source always gets a checkbox, even on days it has nothing */
- oc.innerHTML=Object.entries(SRCS).filter(([s,p])=>!p.group&&!["place_stats","daily_summary","events"].includes(s)).map(([s,p])=>`<div><label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>${has.has(s)?"":' <span class="mut">(nothing this day)</span>'}</label></div>`).join("");
+ /* every map source always gets a checkbox, even on days it has nothing; event sources are filtered in the Events panel */
+ oc.innerHTML=Object.entries(SRCS).filter(([s,p])=>!p.group&&!["place_stats","daily_summary","events","post_claims","geoconfirmed"].includes(s)).map(([s,p])=>`<div><label><input type="checkbox" data-oc="${esc(s)}" ${occOn[s]===false?"":"checked"}> <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>${has.has(s)?"":' <span class="mut">(nothing this day)</span>'}</label></div>`).join("");
  /* change numbers for each ticked area source, for the selected comparison */
  const n=v=>v.toLocaleString("en",{maximumFractionDigits:1});
  $("#cst").innerHTML=occP?Object.entries(META).filter(([s,m])=>m.change_stats&&occOn[s]!==false).map(([s,m])=>{const c=m.change_stats[occP],nm=esc(SRCS[s]?.name||s);
@@ -190,47 +189,54 @@ function drawOcc(){
    ua=incC?[["from occupied",k.r2u],["from contested",k.c2u]]:[["back to Ukrainian-held",k.r2u],["now contested",k.r2c]],
    sum=a=>a.reduce((t,x)=>t+x[1],0),part=a=>a.map(x=>`${x[0]} ${n(x[1])}`).join(", "),net=sum(ru)-sum(ua);
   return`<b>${nm}</b> vs ${esc(c.compared_with)}, ${incC?"occupied or contested":"occupied only"}: Russian advance +${n(sum(ru))} km² (${part(ru)}) · Ukrainian advance +${n(sum(ua))} km² (${part(ua)}) · net change in Russian-${incC?"held":"occupied"} area ${net>=0?"+":"−"}${n(Math.abs(net))} km²`}).join("<br>")||"No change numbers for the ticked sources on this day.":"Pick a comparison above to see change numbers.";
- if(!OCC){st.textContent="No map data for this day yet.";drawFeat();return}
+ if(!OCC){st.textContent="No map data for this day yet.";return}
  const pt=f=>f.geometry.type=="Point",per=f=>!f.properties.period||f.properties.period===occP,
   cs=[...new Set(fs.filter(f=>!pt(f)&&per(f)).map(f=>f.properties.category))],ct=c=>CATS[c]||{},
   dk=isDark(),col=c=>(dk&&ct(c).color_dark)||ct(c).color||"#444",out=c=>(dk&&ct(c).outline_dark)||ct(c).outline;
  st.innerHTML=cs.map(c=>`<div><span class="dot" style="background:${esc(col(c))};${out(c)?`box-shadow:0 0 0 2px ${esc(out(c))}`:""}"></span>${esc(ct(c).label||c)}</div>`).join("")||"No areas on this day.";
- L.geoJSON(OCC,{pane:"occ",filter:f=>(f.properties.claim_sources||[f.properties.source]).some(s=>occOn[s]!==false)&&per(f),
+ L.geoJSON(OCC,{pane:"occ",filter:f=>occOn[f.properties.source]!==false&&per(f),
   pointToLayer:(f,ll)=>L.circleMarker(ll,{pane:"markerPane",radius:f.properties.radius||6}),
-  style:f=>{if(pt(f))return{color:(f.properties.claims||[]).length>1?"#000":"#fff",weight:f.properties.radius?.5:(f.properties.claims||[]).length>1?3:1.5,fillColor:f.properties.color,fillOpacity:.9};const c=f.properties.category,k=col(c);return f.properties.period?(out(c)?{color:out(c),weight:2.5,fill:false}:{color:k,weight:1,fillColor:k,fillOpacity:.65}):{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
+  style:f=>{if(pt(f))return{color:"#fff",weight:f.properties.radius?.5:1.5,fillColor:f.properties.color,fillOpacity:.9};const c=f.properties.category,k=col(c);return f.properties.period?(out(c)?{color:out(c),weight:2.5,fill:false}:{color:k,weight:1,fillColor:k,fillOpacity:.65}):{color:k,weight:1.5,fillColor:k,fillOpacity:.3}},
   onEachFeature:(f,l)=>{const p=f.properties;
-   /* the Features panel lists map events and change patches (not war fires, not the base areas) */
-   if((pt(f)&&p.source!="economist_fires")||p.period)FL.push({f,l});
-   if(pt(f))return l.bindPopup(p.claims?evPopE(p):evPop(p),{maxWidth:360,maxHeight:420});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>`+
-   (p.period?`Compared with ${esc(p.compared_with)}`:`Original types: ${esc((p.source_labels||[]).join("; "))}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol);
- drawFeat()}
-/* Features panel: the day's map events and change patches; "Show on map" flies the map there (panel stays open) */
-function drawFeat(){
- /* filters: source, side and kind (built from what is on the map today); untick to hide */
- const cb=(k,v,l)=>`<label><input type="checkbox" data-ff="${esc(k+"|"+v)}" ${fOn[k+"|"+v]===false?"":"checked"}> ${esc(l)}</label> `,
-  uniq=g=>[...new Set(FL.flatMap(x=>[].concat(g(x.f.properties))))].sort();
- $("#pf").innerHTML=`<div class="mut">Source: ${uniq(srcNames).map(v=>cb("src",v,v)).join("")}</div>`+
-  `<div class="mut">Side: ${uniq(fside).map(v=>cb("side",v,v)).join("")}</div>`+
-  `<div class="mut" style="margin-bottom:6px">Kind: ${cb("kind","event","Map events")}${cb("kind","change","Area changes")}</div>`+
-  `<input id="fq" class="fi" type="search" value="${esc(fq)}" placeholder="Search features (AND, OR, NOT, &quot;phrases&quot;)">`+
-  `<p class="mut" style="margin:4px 0 8px">Newest first. Each entry is one event with all its sources (matched when they cite the same post). Times: the earliest report with a known time; WarSpotting gives a date only. War fires are map-only.</p><div id="flist"></div>`;
- listFeat()}
-const fside=p=>p.period?"Area change":p.side||"Not stated",
- srcNames=p=>p.claims?[...new Set(p.claims.map(c=>c.source_name||c.source))]:[p.source_name],
- ptime=p=>p.time_utc||p.posted_utc||p.earliest_source_utc,
- fkey=p=>ptime(p)||(p.date||p.snapshot_time||"")+"T00:00",   /* date-only items sort after timed ones of the same day */
- fwhen=p=>p.time_utc?`earliest report ${p.time_utc.slice(0,10)} ${p.time_utc.slice(11,16)} UTC`:p.posted_utc?`posted ${p.posted_utc.slice(0,10)} ${p.posted_utc.slice(11,16)} UTC`:p.earliest_source_utc?`earliest source posted ${p.earliest_source_utc.slice(0,10)} ${p.earliest_source_utc.slice(11,16)} UTC`:p.period?`map of ${p.snapshot_time}`:`${p.date} (date only)`;
-function listFeat(){
- const f=fq.trim()?qparse(fq):null,txt=p=>[p.category,p.category_label,p.description,p.side,srcNames(p).join(" "),(p.orbat||[]).join(" "),...(p.claims||[]).map(c=>[c.description,c.category,c.side].join(" "))].join(" ").toLowerCase(),
-  ok=p=>srcNames(p).some(n=>fOn["src|"+n]!==false)&&fOn["side|"+fside(p)]!==false&&fOn["kind|"+(p.period?"change":"event")]!==false;
- const items=FL.map((x,i)=>({...x,i})).filter(x=>ok(x.f.properties)&&(!f||f(txt(x.f.properties)))).sort((a,b)=>fkey(a.f.properties)<fkey(b.f.properties)?1:-1);
- $("#flist").innerHTML=`<p class="mut">${items.length} of ${FL.length} features</p>`+items.map(({f:{properties:p},i})=>`<div class="row">`+
-  (p.period?`<b>${esc(p.category_label)}</b><div class="mut">${esc(p.source_name)} · ${esc(fwhen(p))} · vs ${esc(p.compared_with)} · ${esc(p.area_km2_approx.toLocaleString())} km²</div>`
-   :`<span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category||"",f&&f.terms)}</b><div class="mut">${esc(fwhen(p))} · ${esc(p.side||"")}</div><div class="mut">${p.claims&&p.claims.length>1?`<b>${p.claims.length} sources:</b> `:"Source: "}${esc(srcNames(p).join(", "))}</div><div style="margin-top:4px">${hl((p.description||"").slice(0,300),f&&f.terms)}</div>`)+
-  `<button class="btn" data-go="${i}" style="margin-top:6px">Show on map</button></div>`).join("")}
-function goFeat(i){const {f,l}=FL[i];   /* the panel stays open; the map beside it flies to the item */
- map.once("moveend",()=>l.openPopup());
- if(f.geometry.type=="Point")map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5});else map.flyToBounds(l.getBounds(),{maxZoom:12,duration:1.5})}
+   if(pt(f))return l.bindPopup(evPop(p),{maxWidth:360,maxHeight:420});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>`+
+   (p.period?`Compared with ${esc(p.compared_with)}`:`Original types: ${esc((p.source_labels||[]).join("; "))}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol)}
+/* Events panel: each event of the day as claim, confidence and sources; the filters apply to the map and the list alike.
+   Geolocated events are solid dots; approximate ones (place name, oblast centre or AI estimate) are hollow dashed rings;
+   a thick ring means several independent sources. "Show on map" flies there and keeps the panel open. */
+const LOCS={geolocated:"Geolocated",approximate:"Mapped, location approximate",none:"No location found"},CONF=["high","medium","low"],
+ tm=t=>t.slice(0,16).replace("T"," ")+" UTC",
+ ncat=()=>`${CCAT.filter(c=>eOn["cat|"+c]!==false).length} of ${CCAT.length}`,
+ evOk=p=>eOn["loc|"+p.location]!==false&&eOn["conf|"+p.confidence]!==false&&p.claim_sources.some(s=>eOn["src|"+s]!==false)&&p.categories.some(c=>eOn["cat|"+c]!==false);
+function drawEvPanel(){
+ CCAT=[...new Set(CCAT.concat(EV.flatMap(f=>f.properties.categories)))];   /* the fixed list, plus any other category found in the data */
+ const cb=(k,v,l)=>`<label><input type="checkbox" data-ef="${esc(k+"|"+v)}" ${eOn[k+"|"+v]===false?"":"checked"}> ${l}</label> `,
+  n=(k,v)=>EV.filter(f=>f.properties[k]==v).length,srcs=[...new Set(EV.flatMap(f=>f.properties.claim_sources))].sort();
+ $("#pe").innerHTML=`<div class="mut">Location: ${Object.entries(LOCS).map(([v,l])=>cb("loc",v,`${l} (${n("location",v)})`)).join("")}</div>`+
+  `<div class="mut">Confidence: ${CONF.map(v=>cb("conf",v,`${v} (${n("confidence",v)})`)).join("")}</div>`+
+  `<div class="mut">Sources: ${srcs.map(s=>cb("src",s,esc(SRCS[s]?.name||s))).join("")||"none this day"}</div>`+
+  `<details class="dd"><summary class="btn">Categories: <span id="ncat">${ncat()}</span> ▾</summary><div class="ov ddl"><button class="btn" data-all="1">All</button> <button class="btn" data-all="0">None</button>`+
+  CCAT.map(c=>`<div>${cb("cat",c,`${esc(c)} (${EV.filter(f=>f.properties.categories.includes(c)).length})`)}</div>`).join("")+`</div></details>`+
+  `<input id="eq" class="fi" type="search" value="${esc(eq)}" placeholder="Search events (AND, OR, NOT, &quot;phrases&quot;)">`+
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account). Confidence: geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree. Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
+ listEv()}
+function listEv(){
+ const f=eq.trim()?qparse(eq):null,bad=eq.trim()&&!f,w=f&&f.terms,
+  txt=p=>[p.category,p.place,...p.claims.map(c=>[c.claim,c.category,c.side,c.source_name,c.place,c.post_text].join(" "))].join(" ").toLowerCase(),
+  items=EV.map((x,i)=>({p:x.properties,i})).filter(x=>evOk(x.p)&&(!f||f(txt(x.p)))).sort((a,b)=>(a.p.time_utc||a.p.date)<(b.p.time_utc||b.p.date)?1:-1);
+ drawEv(items);
+ $("#elist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${items.length} of ${EV.length} events</p>`+
+  (items.map(({p,i})=>`<div class="row"><span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category,w)}</b> <span class="mut">· ${esc(p.confidence)} confidence</span>`+
+   `<div class="mut">${esc(p.time_utc?tm(p.time_utc):p.date)} · ${esc(p.side)} · ${esc(LOCS[p.location])}${p.place?": "+esc(p.place):""}</div>`+
+   `<div style="margin-top:4px">${hl((p.claim||"").slice(0,300),w)}</div>`+
+   `<div class="mut">${p.claims.length>1?`<b>${p.claims.length} sources:</b> `:"Source: "}${esc([...new Set(p.claims.map(c=>c.source_name))].join(", "))}</div>`+
+   `<button class="btn" data-go="${i}" style="margin-top:6px">${EL[i]?"Show on map":"Details"}</button></div>`).join("")||`<p class="mut">No events for this day with these filters.</p>`)}
+function drawEv(items){evl.clearLayers();EL=[];
+ items.forEach(({p,i})=>{const g=EV[i].geometry,many=p.claims.length>1;if(!g)return;
+  EL[i]=L.circleMarker([g.coordinates[1],g.coordinates[0]],p.location=="geolocated"?{pane:"markerPane",radius:6,color:many?"#000":"#fff",weight:many?3:1.5,fillColor:p.color,fillOpacity:.9}
+   :{pane:"markerPane",radius:8,color:p.color,weight:many?3:2,dashArray:"3 3",fillColor:p.color,fillOpacity:.15}).bindPopup(evPopE(p),{maxWidth:360,maxHeight:420}).addTo(evl)})}
+function goEv(i){const l=EL[i];
+ if(!l)return L.popup({maxWidth:360,maxHeight:420}).setLatLng(map.getCenter()).setContent(evPopE(EV[i].properties)).openOn(map);   /* no location: details only */
+ map.once("moveend",()=>l.openPopup());map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5})}
 /* Place search: OCHA settlement names (English or Ukrainian), loaded the first time you type */
 let PLACES=null,pmark=null,pres=[];
 async function findPlace(q){
@@ -242,7 +248,6 @@ async function findPlace(q){
  if($("#sres").hidden)drop("sres")}
 function goPlace(i){const t=pres[i];drop(null);map.flyTo([t[5],t[6]],12,{duration:1.5});
  if(pmark)map.removeLayer(pmark);pmark=L.circleMarker([t[5],t[6]],{pane:"markerPane",radius:9,color:"#000",weight:2,fillOpacity:0}).bindTooltip(`${t[0]} · ${t[1]}`,{permanent:true,direction:"top"}).addTo(map)}
-/* Posts panel: Telegram posts of the selected day, filterable by group and by channel; text as posted, media only linked */
 /* Search: words (all must appear), AND, OR, NOT, (brackets), "exact phrases"; not case-sensitive.
    Returns a test function, or null if the search can't be read (e.g. an extra closing bracket). */
 function qparse(q){
@@ -256,25 +261,17 @@ function qparse(q){
 const hl=(t,ws)=>{if(!ws||!ws.length)return esc(t);
  const re=new RegExp("("+ws.slice().sort((a,b)=>b.length-a.length).map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|")+")","giu");
  return t.split(re).map((x,i)=>i%2?`<mark>${esc(x)}</mark>`:esc(x)).join("")};
-function drawPosts(){
- const cb=(k,v,on,l)=>`<label><input type="checkbox" data-${k}="${esc(v)}" ${on[v]===false?"":"checked"}> ${l}</label> `;
- $("#pp").innerHTML=`<div>${Object.entries(PG).map(([g,l])=>cb("pg",g,pgOn,esc(l))).join("")}</div>`+
-  `<div class="mut" style="margin:6px 0">Channels: ${Object.entries(SRCS).filter(([s,p])=>p.group).map(([s,p])=>cb("pc",s,pcOn,`<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>`)).join("")}</div>`+
-  `<input id="pq" class="fi" type="search" value="${esc(pq)}" placeholder='Search posts, e.g. дрон AND (Харків OR Суми) NOT навчання'>`+
-  `<p class="mut" style="margin:4px 0 8px">Words must all appear. Use OR, NOT, (brackets) and "exact phrases". Posts are in their original language.</p><div id="plist"></div>`;
- listPosts()}
-function listPosts(){
- const f=pq.trim()?qparse(pq):null,bad=pq.trim()&&!f;
- const ps=POSTS.filter(p=>pgOn[p.group]!==false&&pcOn[p.source]!==false&&(!f||f(p.text.toLowerCase()))).sort((a,b)=>a.posted_utc<b.posted_utc?1:-1);
- $("#plist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${ps.length} of ${POSTS.length} posts</p>`+
-  (ps.length?ps.map(p=>`<div class="row"><span class="mut">${esc(p.source_name)} · ${esc(PG[p.group]||p.group)} · ${esc(p.posted_utc.slice(11,16))} UTC</span>`+
-   `<p style="white-space:pre-line;margin:6px 0">${hl(p.text,f&&f.terms)}</p><div>${p.links.map(lk).join("<br>")}${p.links.length?"<br>":""}`+
-   `<a href="${esc(p.link)}" target="_blank" rel="noopener">Open original post</a></div></div>`).join(""):`<p class="mut">No posts for this day with these filters.</p>`)}
-/* Event popup (GeoConfirmed, WarSpotting, Telegram, war-fire model): fields copied as each source gives them; media are only linked, never embedded */
-/* Event popup: one event, every source (claim) listed separately, earliest first; never merged into one account */
-const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category||"")}</b><div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${p.claims.length>1?"s":""}`+
- (p.matched_by.length?` · matched by shared link ${p.matched_by.map(esc).join(", ")}`:"")+`</div>`+
- p.claims.map(c=>`<hr><div class="mut"><b>${esc(c.source_name||c.source)}</b> · ${esc(c.verification)}${c.time_utc?` · ${esc(c.time_utc.slice(0,16).replace("T"," "))} UTC`:""}${c.located?"":" · no location of its own"}</div>`+evPop(c)).join("")+
+/* Event popup: confidence and location first, then every source's claim separately, earliest first; media only linked */
+const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><div class="mut">${esc(p.confidence)} confidence (${esc(p.confidence_reason)}) · ${esc(LOCS[p.location])}: ${esc(p.precision)}${p.place?`, ${esc(p.place)}`:""}</div>`+
+ `<div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${p.claims.length>1?"s, listed separately":""}</div>`+
+ p.claims.map(c=>`<hr><div class="mut"><b>${esc(c.source_name)}</b> (${esc(c.kind)}) · ${esc(c.side)} · ${esc(c.time_utc?tm(c.time_utc):c.date)}</div><b>${esc(c.category)}</b>`+
+  (c.source_category?` <span class="mut">(source's own category: ${esc(c.source_category)})</span>`:"")+`<p style="white-space:pre-line;margin:4px 0">${esc(c.claim||"")}</p>`+
+  `<div class="mut">Evidence: ${esc(c.evidence)} · Location: ${esc(c.precision)}${c.place?` (${esc(c.place)})`:""}</div>`+
+  ((c.orbat||[]).length?`<b>ORBAT:</b> ${c.orbat.map(esc).join("; ")}<br>`:"")+
+  ((c.geolocation||[]).length?`<b>Geolocation:</b><br>${c.geolocation.map(lk).join("<br>")}<br>`:"")+
+  ((c.sources||[]).length?`<b>Links:</b><br>${c.sources.map(u=>{const t=(c.source_times||[]).find(x=>x.url==u);return lk(u)+(t&&t.time_utc?` <span class="mut">${esc(tm(t.time_utc))}</span>`:"")+(u==c.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")}<br>`:"")+
+  (c.post_text?`<details><summary>Original post text</summary><p style="white-space:pre-line">${esc(c.post_text)}</p></details>`:"")+
+  `<a href="${esc(c.link)}" target="_blank" rel="noopener">Open original</a>`).join("")+
  (p.possible_matches.length?`<hr><div class="mut">Possibly the same as ${p.possible_matches.length} other item(s) (one post behind several items; not merged).</div>`:"")+`</div>`;
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
 const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category||"")}</b><br><span class="mut">${esc(p.date)}${p.date_note?` (${esc(p.date_note)})`:""} · ${esc(p.side)}</span><p style="white-space:pre-line">${esc(p.description)}</p>`+
