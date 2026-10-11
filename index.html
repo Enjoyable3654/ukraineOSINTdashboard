@@ -204,7 +204,7 @@ function drawOcc(){
    if(pt(f))return l.bindPopup(evPop(p),{maxWidth:340});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>`+
    (p.period?`Compared with ${esc(p.compared_with)}`:`Original types: ${esc((p.source_labels||[]).join("; "))}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol);
  drawFeat()}
-/* Features panel: the day's map events and change patches; "Show on map" closes the panel and zooms there */
+/* Features panel: the day's map events and change patches; "Show on map" flies the map there (panel stays open) */
 function drawFeat(){
  $("#pf").innerHTML=`<input id="fq" class="fi" type="search" value="${esc(fq)}" placeholder="Search features (AND, OR, NOT, &quot;phrases&quot;)">`+
   `<p class="mut" style="margin:4px 0 8px">Map events and area changes for the ticked sources and the selected comparison (Layers). War fires are map-only.</p><div id="flist"></div>`;
@@ -216,7 +216,7 @@ function listFeat(){
   (p.period?`<b>${esc(p.category_label)}</b><div class="mut">${esc(p.source_name)} · vs ${esc(p.compared_with)} · ${esc(p.area_km2_approx.toLocaleString())} km²</div>`
    :`<span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category||"",f&&f.terms)}</b><div class="mut">${esc(p.source_name)} · ${esc(p.side||"")} · ${esc(p.date||"")}</div><div style="margin-top:4px">${hl((p.description||"").slice(0,300),f&&f.terms)}</div>`)+
   `<button class="btn" data-go="${i}" style="margin-top:6px">Show on map</button></div>`).join("")}
-function goFeat(i){const {f,l}=FL[i];if(panel)showPanel(panel);
+function goFeat(i){const {f,l}=FL[i];   /* the panel stays open; the map beside it flies to the item */
  map.once("moveend",()=>l.openPopup());
  if(f.geometry.type=="Point")map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5});else map.flyToBounds(l.getBounds(),{maxZoom:12,duration:1.5})}
 /* Place search: OCHA settlement names (English or Ukrainian), loaded the first time you type */
