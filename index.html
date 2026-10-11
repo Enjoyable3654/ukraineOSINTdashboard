@@ -139,13 +139,13 @@ document.addEventListener("click",e=>{
  render()});
 document.addEventListener("keydown",e=>{if(e.key=="Escape"){drop(null);if(panel)showPanel(panel)}});
 document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}if(e.target.id=="cc"){incC=e.target.checked;drawOcc()}
- if(d.pg){pgOn[d.pg]=e.target.checked;drawPosts()}if(d.pc){pcOn[d.pc]=e.target.checked;drawPosts()}});
+ if(d.ff){fOn[d.ff]=e.target.checked;listFeat()}if(d.pg){pgOn[d.pg]=e.target.checked;drawPosts()}if(d.pc){pcOn[d.pc]=e.target.checked;drawPosts()}});
 document.addEventListener("input",e=>{if(e.target.id=="pq"){pq=e.target.value;listPosts()}if(e.target.id=="fq"){fq=e.target.value;listFeat()}if(e.target.id=="ps")findPlace(e.target.value)});
 
 /* Map data from data/<date>/<source>/..., built by the daily job */
 map.createPane("occ").style.zIndex=450;
 const ol=L.layerGroup().addTo(map),esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let OCC=null,CATS={},SRCS={},PG={},POSTS=[],FL=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",fq="",occP="1d",META={},incC=true;
+let OCC=null,CATS={},SRCS={},PG={},POSTS=[],FL=[],occOn={},pgOn={},pcOn={},occFor=null,pq="",fq="",fOn={},occP="1d",META={},incC=true;
 /* data files change daily: always ask GitHub whether there is a newer copy (fast "not modified" if not) */
 const get=u=>fetch(u,{cache:"no-cache"});
 /* big data files are stored gzip-compressed (lossless); the browser unpacks them here */
@@ -206,15 +206,25 @@ function drawOcc(){
  drawFeat()}
 /* Features panel: the day's map events and change patches; "Show on map" flies the map there (panel stays open) */
 function drawFeat(){
- $("#pf").innerHTML=`<input id="fq" class="fi" type="search" value="${esc(fq)}" placeholder="Search features (AND, OR, NOT, &quot;phrases&quot;)">`+
-  `<p class="mut" style="margin:4px 0 8px">Map events and area changes for the ticked sources and the selected comparison (Layers). War fires are map-only.</p><div id="flist"></div>`;
+ /* filters: source, side and kind (built from what is on the map today); untick to hide */
+ const cb=(k,v,l)=>`<label><input type="checkbox" data-ff="${esc(k+"|"+v)}" ${fOn[k+"|"+v]===false?"":"checked"}> ${esc(l)}</label> `,
+  uniq=g=>[...new Set(FL.map(x=>g(x.f.properties)))].sort();
+ $("#pf").innerHTML=`<div class="mut">Source: ${uniq(p=>p.source_name).map(v=>cb("src",v,v)).join("")}</div>`+
+  `<div class="mut">Side: ${uniq(fside).map(v=>cb("side",v,v)).join("")}</div>`+
+  `<div class="mut" style="margin-bottom:6px">Kind: ${cb("kind","event","Map events")}${cb("kind","change","Area changes")}</div>`+
+  `<input id="fq" class="fi" type="search" value="${esc(fq)}" placeholder="Search features (AND, OR, NOT, &quot;phrases&quot;)">`+
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Times are when the source posted it where the source gives one (Telegram); GeoConfirmed and WarSpotting give a date only. War fires are map-only.</p><div id="flist"></div>`;
  listFeat()}
+const fside=p=>p.period?"Area change":p.side||"Not stated",
+ fkey=p=>p.posted_utc||(p.date||p.snapshot_time||"")+"T00:00",   /* date-only items sort after timed ones of the same day */
+ fwhen=p=>p.posted_utc?`posted ${p.posted_utc.slice(0,10)} ${p.posted_utc.slice(11,16)} UTC`:p.period?`map of ${p.snapshot_time}`:`${p.date} (date only)`;
 function listFeat(){
- const f=fq.trim()?qparse(fq):null,txt=p=>[p.category,p.category_label,p.description,p.side,p.source_name,(p.orbat||[]).join(" ")].join(" ").toLowerCase();
- const items=FL.map((x,i)=>({...x,i})).filter(x=>!f||f(txt(x.f.properties)));
+ const f=fq.trim()?qparse(fq):null,txt=p=>[p.category,p.category_label,p.description,p.side,p.source_name,(p.orbat||[]).join(" ")].join(" ").toLowerCase(),
+  ok=p=>fOn["src|"+p.source_name]!==false&&fOn["side|"+fside(p)]!==false&&fOn["kind|"+(p.period?"change":"event")]!==false;
+ const items=FL.map((x,i)=>({...x,i})).filter(x=>ok(x.f.properties)&&(!f||f(txt(x.f.properties)))).sort((a,b)=>fkey(a.f.properties)<fkey(b.f.properties)?1:-1);
  $("#flist").innerHTML=`<p class="mut">${items.length} of ${FL.length} features</p>`+items.map(({f:{properties:p},i})=>`<div class="row">`+
-  (p.period?`<b>${esc(p.category_label)}</b><div class="mut">${esc(p.source_name)} · vs ${esc(p.compared_with)} · ${esc(p.area_km2_approx.toLocaleString())} km²</div>`
-   :`<span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category||"",f&&f.terms)}</b><div class="mut">${esc(p.source_name)} · ${esc(p.side||"")} · ${esc(p.date||"")}</div><div style="margin-top:4px">${hl((p.description||"").slice(0,300),f&&f.terms)}</div>`)+
+  (p.period?`<b>${esc(p.category_label)}</b><div class="mut">${esc(p.source_name)} · ${esc(fwhen(p))} · vs ${esc(p.compared_with)} · ${esc(p.area_km2_approx.toLocaleString())} km²</div>`
+   :`<span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category||"",f&&f.terms)}</b><div class="mut">${esc(fwhen(p))} · ${esc(p.source_name)} · ${esc(p.side||"")}</div><div style="margin-top:4px">${hl((p.description||"").slice(0,300),f&&f.terms)}</div>`)+
   `<button class="btn" data-go="${i}" style="margin-top:6px">Show on map</button></div>`).join("")}
 function goFeat(i){const {f,l}=FL[i];   /* the panel stays open; the map beside it flies to the item */
  map.once("moveend",()=>l.openPopup());
