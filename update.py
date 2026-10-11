@@ -18,7 +18,7 @@ stored gzip-compressed (lossless). Anything we work out (categories, change laye
 alongside, as derived data. Polygons that match no rule are kept as "unmapped". One failing source never stops the
 others, and a failed run never overwrites good data.
 """
-import argparse, collections, csv, datetime as dt, gzip, html, io, json, math, os, re, shutil, sys, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, collections, csv, datetime as dt, gzip, hashlib, html, io, json, math, os, re, shutil, sys, time, urllib.error, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -201,6 +201,18 @@ SOURCES = {
         "max_pages": 40,
     },
     # "another_source": { ...copy a block above and change it... },
+    # Events (derived): groups claims from all sources that describe the same thing into one event with its own ID,
+    # listing every source (claim) separately. Phase 1 matches only on shared post links (certain matches). Two
+    # items from the same source are never merged; ambiguous links are kept as "possible matches" instead.
+    "events": {
+        "enabled": True,
+        "kind": "event_builder",
+        "name": "Events (combined)",
+        "url": "https://github.com/Enjoyable3654/ukraineOSINTdashboard",
+        # how each source's claims are described; the first listed source with a location gives the event's place
+        "verification": {"geoconfirmed": "geolocated by GeoConfirmed", "warspotting": "visually confirmed loss (WarSpotting)",
+                         "lost_warinua": "claimed by Telegram channel", "ua_mod": "official claim", "ru_mod": "official claim"},
+    },
     # Place and region statistics (derived): runs after all sources and before the summary. Uses OCHA's boundaries
     # in ref/ (raions and settlement outlines). For each day of the window: (a) settlements inside each change patch,
     # per area source and comparison period; (b) events, fires and changed area per oblast and raion; (c) where the
@@ -949,6 +961,107 @@ def run_geo_analysis(sid, cfg, args, day, now, data):
     print(f"[{sid}] place and region statistics saved for the last {cfg['lookback_days'] + 1} days")
 
 
+def post_key(url):
+    """A normalised key for a link that points at one specific post or video (or None for general links), so the
+    same post written different ways (x.com/twitter.com, t.me/s/..., tracking parameters) matches."""
+    u = html.unescape(url).strip()
+    pats = [(r"(?:twitter|x)\.com/[^/?#]+/status(?:es)?/(\d+)", "x:{}"), (r"t\.me/(?:s/)?([A-Za-z0-9_]{4,})/(\d+)", "tg:{}/{}"),
+            (r"tiktok\.com/@[^/]+/video/(\d+)", "tiktok:{}"), (r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|shorts/)|youtu\.be/)([\w-]{11})", "yt:{}"),
+            (r"instagram\.com/(?:p|reel|tv)/([\w-]+)", "ig:{}"),
+            (r"facebook\.com/((?:share/[prv]/|[^/]+/(?:posts|videos)/|reel/|watch/\?v=|photo/?\?fbid=|permalink\.php\?story_fbid=)[\w.-]+)", "fb:{}")]
+    for pat, fmt in pats:
+        if m := re.search(pat, u, re.I):
+            return fmt.format(*(g.lower() if fmt.startswith(("tg", "fb")) else g for g in m.groups()))
+    return None
+
+
+def run_event_builder(sid, cfg, args, day, now, data):
+    """Rebuild all events from every saved claim (point items and posts) on every day. Claims sharing a link to the
+    same specific post are grouped, strongest links first, never putting two claims from the same source together;
+    links that would need that are kept as possible matches. Groups with a location become events, filed under the
+    date of their earliest claim; an event's ID comes from its earliest claim, so it stays stable."""
+    claims = {}
+    for f in sorted(data.glob("*/*/points/events.geojson")) + sorted(data.glob("*/*/posts/posts.geojson")):
+        src = f.parent.parent.name
+        if src == sid:
+            continue
+        for x in read_json(f, {"features": []})["features"]:
+            p = x["properties"]
+            own = [p.get("link")] + p.get("sources", []) + p.get("links", [])
+            when = p.get("posted_utc") or p.get("earliest_source_utc") or (p.get("date") or f.parent.parent.parent.name) + "T23:59:59"
+            claims[f"{src}:{p['id']}"] = {"src": src, "x": x, "when": when, "keys": {k for k in map(post_key, filter(None, own)) if k}}
+    by_key = collections.defaultdict(list)
+    for c, v in claims.items():
+        for k in v["keys"]:
+            by_key[k].append(c)
+    pairs = collections.Counter()   # (claim a, claim b) -> number of shared post links
+    possible = collections.defaultdict(set)
+    for k, cs in by_key.items():
+        per_src = collections.Counter(claims[c]["src"] for c in cs)
+        for i, a in enumerate(cs):
+            for b in cs[i + 1:]:
+                if claims[a]["src"] == claims[b]["src"]:
+                    continue
+                if per_src[claims[a]["src"]] > 1 or per_src[claims[b]["src"]] > 1:
+                    possible[a].add(b)   # one post behind several items of a source (e.g. one video, several vehicles): ambiguous
+                    possible[b].add(a)
+                else:
+                    pairs[tuple(sorted((a, b)))] += 1
+    group = {c: {c} for c in claims}
+    for (a, b), n in sorted(pairs.items(), key=lambda kv: -kv[1]):
+        ga, gb = group[a], group[b]
+        if ga is gb:
+            continue
+        if {claims[c]["src"] for c in ga} & {claims[c]["src"] for c in gb}:
+            possible[a].add(b)   # would put two items of one source together: keep apart, note it
+            possible[b].add(a)
+            continue
+        ga |= gb
+        for c in gb:
+            group[c] = ga
+    order = list(cfg["verification"])
+    events, seen = collections.defaultdict(list), set()
+    for g in {id(g): g for g in group.values()}.values():
+        located = [c for c in g if claims[c]["x"].get("geometry")]
+        if not located:
+            continue   # posts with no located partner stay in the Posts panel only
+        members = sorted(g, key=lambda c: (claims[c]["when"], c))
+        lead = min(located, key=lambda c: (order.index(claims[c]["src"]) if claims[c]["src"] in order else 99, claims[c]["when"]))
+        lp = claims[lead]["x"]["properties"]
+        eid = "ev-" + hashlib.sha1(members[0].encode()).hexdigest()[:10]
+        d = claims[members[0]]["when"][:10]
+        lst = []
+        for c in members:
+            p = claims[c]["x"]["properties"]
+            lst.append({"key": c, "source": claims[c]["src"], "source_name": p.get("source_name"), "verification": cfg["verification"].get(claims[c]["src"], "claim"),
+                        "time_utc": p.get("posted_utc") or p.get("earliest_source_utc"), "date": p.get("date") or claims[c]["when"][:10],
+                        "side": p.get("side"), "category": p.get("category"), "description": p.get("description") or p.get("text"),
+                        "orbat": p.get("orbat", []), "geolocation": p.get("geolocation"), "sources": p.get("sources") or p.get("links") or [],
+                        "source_times": p.get("source_times"), "earliest_source_url": p.get("earliest_source_url"), "link": p.get("link"),
+                        "date_note": p.get("date_note"), "located": bool(claims[c]["x"].get("geometry"))})
+        shared = sorted({k for c in members for k in claims[c]["keys"]} & {k for k, cs in by_key.items() if len({claims[x]["src"] for x in cs if x in g}) > 1})
+        events[d].append({"type": "Feature", "geometry": claims[lead]["x"]["geometry"], "properties": {
+            "source": sid, "source_name": cfg["name"], "source_url": cfg["url"], "id": eid, "date": d,
+            "time_utc": next((x["time_utc"] for x in lst if x["time_utc"]), None), "category": lp.get("category"),
+            "side": lp.get("side"), "color": lp.get("color"), "description": lp.get("description"), "location_from": lead,
+            "claim_sources": sorted({x["source"] for x in lst}), "claims": lst, "matched_by": shared,
+            "possible_matches": sorted({o for c in members for o in possible.get(c, ())} - set(members))}})
+    fn = KIND_FILENAMES[cfg["kind"]]
+    for d, feats in sorted(events.items()):
+        put_in_place(args, data, d, sid, fn, sorted(feats, key=lambda e: e["properties"]["id"]))
+        n_multi = sum(1 for e in feats if len(e["properties"]["claims"]) > 1)
+        save_meta(data, d, sid, {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), "files": [f"{sid}/{fn}"],
+                                 "events": len(feats), "multi_source_events": n_multi})
+    for m in data.glob("*/meta.json"):   # days that no longer have events: remove the old entry and file
+        if m.parent.name not in events and sid in read_json(m, {"sources": {}})["sources"]:
+            j = read_json(m, None)
+            j["sources"].pop(sid)
+            write_json(m, j)
+            shutil.rmtree(m.parent / sid, ignore_errors=True)
+    total = sum(len(v) for v in events.values())
+    print(f"[{sid}] {len(claims)} claims -> {total} events, {sum(1 for v in events.values() for e in v if len(e['properties']['claims']) > 1)} with several sources")
+
+
 def run_llm_summary(sid, cfg, args, day, now, data):
     """Summarise everything saved for one day (default: the day before, which is complete) with Gemini.
     Saves data/<day>/<source>/text/summary.json, or the error in meta.json if anything fails."""
@@ -1065,14 +1178,16 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
 KINDS = {"occupation": run_occupation, "kmz_layers": run_kmz_layers, "geoconfirmed": run_geoconfirmed,
          "warspotting": run_warspotting, "telegram_channel": run_telegram, "war_fires": run_war_fires,
          "telegram_posts": run_telegram_posts, "llm_summary": run_llm_summary,
-         "geo_analysis": run_geo_analysis}   # add new kinds of source here
+         "geo_analysis": run_geo_analysis,
+         "event_builder": run_event_builder}   # add new kinds of source here
 # Output file for each kind, saved as data/<day>/<source>/<data type>/<specific data>.geojson.
 # meta.json lists each source's files, and the dashboard reads them from there.
 KIND_FILENAMES = {"occupation": "polygons/occupation.geojson.gz", "kmz_layers": "polygons/occupation.geojson.gz",
                   "geoconfirmed": "points/events.geojson", "warspotting": "points/events.geojson",
                   "telegram_channel": "points/events.geojson", "war_fires": "points/fires.geojson.gz",
                   "telegram_posts": "posts/posts.geojson", "llm_summary": "text/summary.json",
-                  "geo_analysis": "stats/facts.json"}
+                  "geo_analysis": "stats/facts.json",
+                  "event_builder": "points/events.geojson"}
 
 
 def build_reference(src):
