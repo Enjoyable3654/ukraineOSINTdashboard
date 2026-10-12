@@ -289,6 +289,7 @@ SOURCES = {
         "model": "gemini-3.8-flash",   # gemini-2.5-flash is closed to new users (Google, 2026-10)
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         # Usage limits: one request per day; input capped at this many characters; output capped.
+        "catch_up_days": 3,   # also retries days that still have no summary
         "max_input_chars": 300000,
         "generation": {"maxOutputTokens": 4000},
         "instructions": (
@@ -1195,8 +1196,13 @@ def run_event_builder(sid, cfg, args, day, now, data):
     print(f"[{sid}] {len(claims)} claims -> {total} events ({sum(1 for v in events.values() for e in v if len(e['properties']['claims']) > 1)} with several sources)")
 
 
+class DailyLimit(RuntimeError):
+    pass
+
+
 def gemini(cfg, prompt, sid):
-    """One Gemini request; waits and retries when Gemini is busy (30 s, 1, 2, 4 min). Returns the reply text."""
+    """One Gemini request; waits and retries when Gemini is busy (30 s, 1, 2, 4 min). Returns the reply text.
+    If the free daily limit is used up, stops at once (raises DailyLimit): waiting would not help until it resets."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("no GEMINI_API_KEY secret is set")
@@ -1209,8 +1215,11 @@ def gemini(cfg, prompt, sid):
                 out = json.loads(r.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            if e.code == 429 and re.search(r"per ?day", body, re.I):
+                raise DailyLimit("Gemini's free daily limit is used up (it resets at midnight US Pacific time); will retry on the next run")
             if e.code not in (429, 500, 503) or attempt == 4:
-                raise RuntimeError(e.read().decode("utf-8", "replace")[:300])
+                raise RuntimeError(body[:300])
             print(f"[{sid}] Gemini busy ({e.code}), retrying in {30 * 2 ** attempt} s", file=sys.stderr)
             time.sleep(30 * 2 ** attempt)
     text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
@@ -1240,8 +1249,10 @@ def run_claim_parser(sid, cfg, args, day, now, data):
         try:
             res = {r["post"]: r.get("claims") or [] for r in json.loads(gemini(cfg, prompt, sid))["results"]}
         except Exception as e:
-            failed += len(batch)
+            failed += len(batch) if not isinstance(e, DailyLimit) else len(todo) - i
             print(f"[{sid}] batch of {len(batch)} posts failed (will retry next run): {str(e)[:200]}", file=sys.stderr)
+            if isinstance(e, DailyLimit):
+                break
             continue
         for d, k, p in batch:
             if k not in res:
@@ -1263,9 +1274,37 @@ def run_claim_parser(sid, cfg, args, day, now, data):
 
 
 def run_llm_summary(sid, cfg, args, day, now, data):
-    """Summarise everything saved for one day (default: the day before, which is complete) with Gemini.
-    Saves data/<day>/<source>/text/summary.json, or the error in meta.json if anything fails."""
-    d = day if args.date else (dt.date.fromisoformat(day) - dt.timedelta(1)).isoformat()
+    """Summarise everything saved for one day with Gemini: the given --date, else the day before (which is complete) plus
+    any of the few days before it that still have no summary (e.g. after Gemini's daily limit). Saves
+    data/<day>/<source>/text/summary.json, or the error in that day's meta.json."""
+    if args.date:
+        days = [day]
+    else:
+        end = dt.date.fromisoformat(day)
+        days = [d for d in ((end - dt.timedelta(n)).isoformat() for n in range(cfg["catch_up_days"], 0, -1))
+                if n_ok(data, d, sid) is False]
+    errors = []
+    for d in days:
+        try:
+            summarise_day(sid, cfg, args, d, now, data)
+        except Exception as e:
+            save_meta(data, d, sid, {"status": "error", "error": f"Summary could not be generated: {e}", "at_utc": now.isoformat(timespec="seconds")})
+            errors.append(f"{d}: {str(e)[:300]}")
+            if isinstance(e, DailyLimit):
+                break
+    if errors:
+        err = SourceError("; ".join(errors))
+        err.saved = True   # already saved on the summarised day; not on today's
+        raise err
+
+
+def n_ok(data, d, sid):
+    """False if day d has saved data but no successful summary yet; None if the day has no data at all."""
+    m = read_json(data / d / "meta.json", None)
+    return None if m is None else m["sources"].get(sid, {}).get("status") == "ok"
+
+
+def summarise_day(sid, cfg, args, d, now, data):
     meta = read_json(data / d / "meta.json", {"sources": {}})["sources"]
     lines = []
     for src, m in meta.items():
@@ -1301,15 +1340,9 @@ def run_llm_summary(sid, cfg, args, day, now, data):
             lines.append(f"[Area sources agreement, '{what.get(cat, cat)}' vs previous day, km2] " + ", ".join(f"{k}: {x}" for k, x in v.items() if k != "places_both")
                          + (f"; settlements where both agree: {', '.join(v['places_both'][:25])}" if v["places_both"] else ""))
     material = "\n".join(lines)[:cfg["max_input_chars"]]
-    try:
-        if not lines:
-            raise RuntimeError(f"nothing saved for {d} to summarise")
-        text = gemini(cfg, f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}", sid)
-    except Exception as e:
-        msg = str(e)
-        save_meta(data, d, sid, {"status": "error", "error": f"Summary could not be generated: {msg}",
-                                 "at_utc": now.isoformat(timespec="seconds")})
-        raise SourceError(f"{d}: {msg}")
+    if not lines:
+        raise RuntimeError(f"nothing saved for {d} to summarise")
+    text = gemini(cfg, f"{cfg['instructions']}\n\nMaterial for {d}:\n{material}", sid)
     fn = KIND_FILENAMES[cfg["kind"]]
     write_json(args.working_dir_path / d / sid / fn, {"date": d, "text": text, "model": cfg["model"],
                                                       "generated_utc": now.isoformat(timespec="seconds"), "input_items": len(lines)})
@@ -1430,7 +1463,7 @@ def main():
         except SourceError as e:
             print(f"[{sid}] FAILED: {e}", file=sys.stderr)
             failed.append(sid)
-            if not args.inspect and sid not in read_json(data / day / "meta.json", {"sources": {}})["sources"]:
+            if not args.inspect and not getattr(e, "saved", False) and sid not in read_json(data / day / "meta.json", {"sources": {}})["sources"]:
                 save_meta(data, day, sid, {"status": "error", "error": str(e), "at_utc": now.isoformat(timespec="seconds")})
 
     if worked and not args.inspect:
