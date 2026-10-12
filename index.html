@@ -36,8 +36,6 @@ a{color:var(--acc)}
 #panel{position:fixed;top:0;right:0;bottom:0;width:460px;z-index:1001;display:flex;flex-direction:column;border-radius:0;border-width:0 0 0 1px}
 body.pan #map{right:460px}body.pan #rt{right:470px}
 .pb{overflow:auto;flex:1;padding:10px}
-#mv{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center}
-.mvb{width:min(516px,calc(100vw - 32px));max-height:92vh;overflow:auto;padding:8px}
 #tn{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:1000;padding:8px 12px;max-width:90vw;background:var(--warn);color:var(--warnt)}
 @media(max-width:700px){#ps{width:150px}#rt{top:auto;bottom:10px}body.pan #map{right:0}body.pan #rt{right:10px}#panel{top:auto;left:0;right:0;bottom:58px;width:100%;height:65vh;border-radius:12px 12px 0 0;border-width:1px}}
 /* calendar */
@@ -89,7 +87,6 @@ body.pan #map{right:460px}body.pan #rt{right:470px}
 </div>
 <div id="rt" class="ov"><button class="btn" data-panel="ev">Events</button></div>
 <aside id="panel" class="ov" hidden><div id="pe" class="pb"></div></aside>
-<div id="mv" hidden><div class="ov mvb"><button class="btn" id="mvx">Close ✕</button><div id="mvc" style="margin-top:6px"></div></div></div>
 <p id="tn" class="ov" hidden></p>
 <script>
 const $=s=>document.querySelector(s);
@@ -128,9 +125,7 @@ function render(){
  cal();
  $("#dbtn").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"short",day:"numeric",month:"short",year:"numeric",timeZone:"UTC"})+" ▾";
  if(occFor!==sel){occFor=sel;loadOcc()}}
-const mvClose=()=>{$("#mv").hidden=true;$("#mvc").replaceChildren()};   /* closing also stops a playing video */
 document.addEventListener("click",e=>{
- if(e.target.id=="mv"||e.target.id=="mvx")return mvClose();
  const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-tg]");if(!b)return;
  const d=b.dataset;
  if(d.tg)return tgEmbed(b);
@@ -143,7 +138,7 @@ document.addEventListener("click",e=>{
  else if(d.d){sel=d.d;drop(null)}
  else{const k=key(new Date(sel+"T00:00:00Z").getTime()+d.step*864e5);if(!A[k])return;sel=k;const t=new Date(k+"T00:00:00Z");view=[t.getUTCFullYear(),t.getUTCMonth()]}
  render()});
-document.addEventListener("keydown",e=>{if(e.key=="Escape"){if(!$("#mv").hidden)return mvClose();drop(null);if(panel)showPanel(panel)}});
+document.addEventListener("keydown",e=>{if(e.key=="Escape"){drop(null);if(panel)showPanel(panel)}});
 document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}if(e.target.id=="cc"){incC=e.target.checked;drawOcc()}
  if(d.ef){eOn[d.ef]=e.target.checked;if(d.ef.startsWith("cat|"))$("#ncat").textContent=ncat();listEv()}});
 document.addEventListener("input",e=>{if(e.target.id=="eq"){eq=e.target.value;listEv()}if(e.target.id=="ps")findPlace(e.target.value)});
@@ -286,11 +281,13 @@ const tgs=c=>{const o={};[c.link,...(c.sources||[])].forEach(u=>{const m=/t\.me\
 /* Show only the channel name and the media: cut the embed off below the media. Sizes from Telegram's widget style
    (bubble 7px from the left, 12px padding, 19px name line, 12px above the media); the media's shape is saved with each
    post, else assumed square (cuts no square video; a wide one shows a line of text). "Show full post" removes the cut. */
-function tgEmbed(b){const c=$("#mvc"),w=document.createElement("div"),s=document.createElement("script"),f=document.createElement("button");
- $("#mv").hidden=false;c.replaceChildren(w,f);   /* opens in a large viewer; Telegram's embed is at most 500px wide */
- w.style.cssText=`overflow:hidden;height:${Math.round(43+(Math.min(c.clientWidth,500)-7)*(+b.dataset.r||100)/100)}px`;
+function tgEmbed(b){const w=document.createElement("div"),s=document.createElement("script"),f=document.createElement("button"),p=map._popup,
+  W=Math.min(500,innerWidth-80);   /* the popup widens to fit the embed: Telegram's embed is at most 500px wide */
+ const fit=()=>{if(p){p._updateLayout();p._updatePosition()}};   /* re-measure the popup without re-drawing it (Leaflet 1.9.4) */
+ if(p){Object.assign(p.options,{minWidth:W,maxWidth:W,maxHeight:Math.min(innerHeight-100,800)});fit()}
+ w.style.cssText=`overflow:hidden;height:${Math.round(43+(Math.min(b.parentNode.clientWidth,500)-7)*(+b.dataset.r||100)/100)}px`;
  Object.assign(s.dataset,{telegramPost:b.dataset.tg,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s);
- f.className="btn";f.textContent="Show full post";f.onclick=()=>{w.style.height="";f.remove()}}
+ f.className="btn";f.textContent="Show full post";f.onclick=()=>{w.style.height="";f.remove();fit()};b.replaceWith(w,f);fit()}
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
 const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category||"")}</b><br><span class="mut">${esc(p.date)}${p.date_note?` (${esc(p.date_note)})`:""} · ${esc(p.side)}</span><p style="white-space:pre-line">${esc(p.description)}</p>`+
  ((p.orbat||[]).length?`<b>ORBAT:</b> ${p.orbat.map(esc).join("; ")}<br>`:"")+
