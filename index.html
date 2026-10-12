@@ -282,9 +282,9 @@ const tgs=c=>{const o={};[c.link,...(c.sources||[])].forEach(u=>{const m=/t\.me\
    (bubble 7px from the left, 12px padding, 19px name line, 12px above the media); the media's shape is saved with each
    post, else assumed square (cuts no square video; a wide one shows a line of text). "Show full post" removes the cut. */
 function tgEmbed(b){const w=document.createElement("div"),s=document.createElement("script"),f=document.createElement("button"),p=map._popup,
-  W=Math.min(500,innerWidth-80);   /* the popup widens to fit the embed: Telegram's embed is at most 500px wide */
- const fit=()=>{if(p){p._updateLayout();p._updatePosition()}};   /* re-measure the popup without re-drawing it (Leaflet 1.9.4) */
- if(p){Object.assign(p.options,{minWidth:W,maxWidth:W,maxHeight:Math.min(innerHeight-100,800)});fit()}
+  W=Math.max(300,Math.min(360,40000/(+b.dataset.r||100)));   /* normal popup width; tall media narrower (Telegram's minimum is 300px) to stay about 400px high */
+ const fit=()=>{if(p){p._updateLayout();p._updatePosition();p._adjustPan()}};   /* re-measure the popup without re-drawing it (Leaflet 1.9.4) */
+ if(p){Object.assign(p.options,{minWidth:W,maxWidth:W,maxHeight:null});fit()}   /* no inner scrolling: the popup grows to fit and the map pans to show it */
  w.style.cssText=`overflow:hidden;height:${Math.round(43+(Math.min(b.parentNode.clientWidth,500)-7)*(+b.dataset.r||100)/100)}px`;
  Object.assign(s.dataset,{telegramPost:b.dataset.tg,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s);
  f.className="btn";f.textContent="Show full post";f.onclick=()=>{w.style.height="";f.remove();fit()};b.replaceWith(w,f);fit()}
