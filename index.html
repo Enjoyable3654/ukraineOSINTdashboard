@@ -285,10 +285,10 @@ const tgs=c=>{const o={};[c.link,...(c.sources||[])].forEach(u=>{const m=/t\.me\
  if(m&&!(u==c.link&&c.evidence=="text only"))o[m[1]+"/"+m[2]]??=u==c.link?c.media_ratio_pct:null});return Object.entries(o)};
 /* Show only the channel name and the media: cut the embed off below the media. Sizes from Telegram's widget style
    (bubble 7px from the left, 12px padding, 19px name line, 12px above the media); the media's shape is saved with each
-   post, else assumed 16:9. "Show full post" removes the cut. */
+   post, else assumed square (cuts no square video; a wide one shows a line of text). "Show full post" removes the cut. */
 function tgEmbed(b){const c=$("#mvc"),w=document.createElement("div"),s=document.createElement("script"),f=document.createElement("button");
  $("#mv").hidden=false;c.replaceChildren(w,f);   /* opens in a large viewer; Telegram's embed is at most 500px wide */
- w.style.cssText=`overflow:hidden;height:${Math.round(43+(Math.min(c.clientWidth,500)-7)*(+b.dataset.r||56.25)/100)}px`;
+ w.style.cssText=`overflow:hidden;height:${Math.round(43+(Math.min(c.clientWidth,500)-7)*(+b.dataset.r||100)/100)}px`;
  Object.assign(s.dataset,{telegramPost:b.dataset.tg,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s);
  f.className="btn";f.textContent="Show full post";f.onclick=()=>{w.style.height="";f.remove()}}
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
