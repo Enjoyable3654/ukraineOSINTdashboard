@@ -126,8 +126,9 @@ function render(){
  $("#dbtn").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"short",day:"numeric",month:"short",year:"numeric",timeZone:"UTC"})+" ▾";
  if(occFor!==sel){occFor=sel;loadOcc()}}
 document.addEventListener("click",e=>{
- const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all]");if(!b)return;
+ const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-tg]");if(!b)return;
  const d=b.dataset;
+ if(d.tg){const s=document.createElement("script");s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";s.dataset.telegramPost=d.tg;s.dataset.width="100%";return b.replaceWith(s)}
  if(d.drop)return drop(d.drop);
  if(d.panel)return showPanel(d.panel);
  if(d.go)return goEv(+d.go);
@@ -270,9 +271,12 @@ const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><d
   ((c.orbat||[]).length?`<b>ORBAT:</b> ${c.orbat.map(esc).join("; ")}<br>`:"")+
   ((c.geolocation||[]).length?`<b>Geolocation:</b><br>${c.geolocation.map(lk).join("<br>")}<br>`:"")+
   ((c.sources||[]).length?`<b>Links:</b><br>${c.sources.map(u=>{const t=(c.source_times||[]).find(x=>x.url==u);return lk(u)+(t&&t.time_utc?` <span class="mut">${esc(tm(t.time_utc))}</span>`:"")+(u==c.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")}<br>`:"")+
+  tgs(c).map(k=>`<div><button class="btn" data-tg="${esc(k)}" style="margin:4px 0">Telegram post ${esc(k)}: photos/videos may be graphic. Click to view</button></div>`).join("")+
   (c.post_text?`<details><summary>Original post text</summary><p style="white-space:pre-line">${esc(c.post_text)}</p></details>`:"")+
   `<a href="${esc(c.link)}" target="_blank" rel="noopener">Open original</a>`).join("")+
  (p.possible_matches.length?`<hr><div class="mut">Possibly the same as ${p.possible_matches.length} other item(s) (one post behind several items; not merged).</div>`:"")+`</div>`;
+/* Telegram posts behind a claim (channel/number), shown only through Telegram's own embed after a click; nothing is copied */
+const tgs=c=>[...new Set([c.link,...(c.sources||[])].map(u=>(/t\.me\/(?:s\/)?(\w{4,})\/(\d+)/.exec(u||"")||[]).slice(1).join("/")).filter(Boolean))];
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
 const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category||"")}</b><br><span class="mut">${esc(p.date)}${p.date_note?` (${esc(p.date_note)})`:""} · ${esc(p.side)}</span><p style="white-space:pre-line">${esc(p.description)}</p>`+
  ((p.orbat||[]).length?`<b>ORBAT:</b> ${p.orbat.map(esc).join("; ")}<br>`:"")+
