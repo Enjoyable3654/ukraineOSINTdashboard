@@ -840,14 +840,16 @@ COORDS = r"(-?\d{1,2}\.\d{2,})\s*,\s*(-?\d{1,3}\.\d{2,})"
 
 
 def telegram_posts(page, channel):
-    """(post number, publish time, message HTML, attached media types) for each post on a t.me/s/<channel> page."""
+    """(post number, publish time, message HTML, attached media types, height of the media block as % of its width, as
+    Telegram gives it) for each post on a t.me/s/<channel> page."""
     for b in re.split(r'(?=<div class="tgme_widget_message_wrap)', page)[1:]:
         m = re.search(rf'data-post="{channel}/(\d+)"', b)
         t = re.search(r'<time datetime="([^"]+)"', b)
         x = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', b, re.S)
         if m and t and x:
             media = [k for k, pat in (("video", "message_video|roundvideo"), ("photo", "message_photo")) if re.search(pat, b)]
-            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1), media
+            r = re.search(r"padding-top:([\d.]+)%", b[:x.start()])   # media come before the text
+            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1), media, float(r.group(1)) if r and media else None
 
 
 def telegram_recent(cfg, cutoff):
@@ -874,12 +876,12 @@ def run_telegram_posts(sid, cfg, args, day, now, data):
     Merged by post number, so a post read on two runs is saved once."""
     cutoff, found, n = now - dt.timedelta(days=cfg["lookback_days"]), collections.defaultdict(dict), 0
     try:
-        for pid, when, body, media in telegram_recent(cfg, cutoff):
+        for pid, when, body, media, ratio in telegram_recent(cfg, cutoff):
             lines, links = telegram_lines_links(body)
             n += 1
             found[when.date().isoformat()][pid] = {"type": "Feature", "geometry": None, "properties": {
                 "source": sid, "source_name": cfg["name"], "group": cfg["group"], "id": pid, "posted_utc": when.isoformat(),
-                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "media": media, "original_html": body}}
+                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "media": media, "media_ratio_pct": ratio, "original_html": body}}
     except Exception as e:
         raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
@@ -894,7 +896,7 @@ def run_telegram(sid, cfg, args, day, now, data):
     ch, cutoff = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"])
     found, n_posts, no_date = collections.defaultdict(dict), 0, 0
     try:
-        for pid, when, body, media in telegram_recent(cfg, cutoff):
+        for pid, when, body, media, ratio in telegram_recent(cfg, cutoff):
             n_posts += 1
             lines, links = telegram_lines_links(body)
             m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
@@ -1099,7 +1101,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
                     "color": "#0051CA" if side.lower().startswith("ukr") else "#E00000" if side.lower().startswith("rus") else "#666666",
                     "date": (c.get("date") or p["posted_utc"])[:10], "time_utc": p["posted_utc"], "coords": coords, "precision": prec,
                     "place": place, "evidence": ev, "link": p["link"], "sources": [u for u in p.get("links", []) if post_key(u)],
-                    "post_text": p["text"], "keys": {k2 for k2 in map(post_key, [p["link"]] + p.get("links", [])) if k2}}
+                    "post_text": p["text"], "media_ratio_pct": p.get("media_ratio_pct"), "keys": {k2 for k2 in map(post_key, [p["link"]] + p.get("links", [])) if k2}}
     by_key = collections.defaultdict(list)
     for c, v in claims.items():
         for k in v["keys"]:
