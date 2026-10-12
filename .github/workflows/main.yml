@@ -56,4 +56,4 @@ jobs:
           git config user.email "data-bot@users.noreply.github.com"
           git add data
           git diff --cached --quiet || git commit -m "Daily data $(date -u +%F)"
-          git push
+          git pull --rebase && git push   # someone may have uploaded while the job ran
