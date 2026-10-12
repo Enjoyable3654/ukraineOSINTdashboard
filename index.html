@@ -284,7 +284,7 @@ const tgs=c=>{const o={};[c.link,...(c.sources||[])].forEach(u=>{const m=/t\.me\
    post, else assumed square (cuts no square video; a wide one shows a line of text). "Show full post" removes the cut. */
 function tgEmbed(b){const box=document.createElement("div"),w=document.createElement("div"),s=document.createElement("script"),p=map._popup,o=p&&{...p.options},
   r=+b.dataset.r||100,W=Math.max(300,Math.min(360,40000/r)),   /* normal popup width; tall media narrower (Telegram's minimum is 300px) */
-  btn=(t,f)=>{const x=document.createElement("button");x.className="btn";x.style.margin="4px 4px 4px 0";x.textContent=t;x.onclick=f;return x};
+  btn=(t,f)=>{const x=document.createElement("button");x.className="btn";x.style.margin="4px 4px 4px 0";x.textContent=t;x.onclick=e=>{e.stopPropagation();f()};return x};   /* the click must not reach the map, which would close the popup */
  /* re-measure the popup without re-drawing it (Leaflet 1.9.4): it grows upwards from its marker and the map stays still.
     It is always tall enough to show the whole media at once; other text above may scroll, with the media in view.
     Only if the space above the marker is shorter than the media does the map move, just enough to show them. */
@@ -293,7 +293,7 @@ function tgEmbed(b){const box=document.createElement("div"),w=document.createEle
   const c=p._contentNode;c.scrollTop+=box.getBoundingClientRect().top-c.getBoundingClientRect().top-8;if(need>room)p._adjustPan()};
  if(p)Object.assign(p.options,{minWidth:W,maxWidth:W});
  const full=btn("Show full post",()=>{w.style.height="";full.remove();fit()});
- box.append(btn("✕ Hide "+b.textContent.replace("View attached ",""),()=>{box.replaceWith(b);if(p){Object.assign(p.options,o);p._updateLayout();p._updatePosition()}}),full,w);
+ box.append(btn("✕ Hide "+b.textContent.replace("View attached ",""),()=>{box.replaceWith(b);if(p){Object.assign(p.options,o);p._updateLayout();p._updatePosition();p._contentNode.scrollTop=0}}),full,w);   /* back to how it first opened; map not moved */
  w.style.cssText=`overflow:hidden;height:${Math.round(43+(W-7)*r/100)}px`;
  Object.assign(s.dataset,{telegramPost:b.dataset.tg,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s);
  b.replaceWith(box);fit()}
