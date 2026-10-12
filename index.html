@@ -94,7 +94,7 @@ const $=s=>document.querySelector(s);
 const TH=["auto","light","dark"],rootEl=document.documentElement;let th=rootEl.dataset.theme||"auto";
 const setTh=t=>{th=t;if(t=="auto")delete rootEl.dataset.theme;else rootEl.dataset.theme=t;$("#theme").textContent=({auto:"◐",light:"☀",dark:"☾"})[t];$("#theme").title="Theme: "+t+" (click to change)";
  try{t=="auto"?localStorage.removeItem("theme"):localStorage.setItem("theme",t)}catch(e){}};
-setTh(th);$("#theme").onclick=()=>{setTh(TH[(TH.indexOf(th)+1)%3]);drawOcc()};
+setTh(th);$("#theme").onclick=()=>{setTh(TH[(TH.indexOf(th)+1)%3]);drawOcc();if($("#elist"))listEv()};   /* event outlines follow the theme */
 const isDark=()=>rootEl.dataset.theme?rootEl.dataset.theme=="dark":matchMedia("(prefers-color-scheme: dark)").matches;
 const key=d=>new Date(d).toISOString().slice(0,10);
 const A={};
@@ -126,9 +126,9 @@ function render(){
  $("#dbtn").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"short",day:"numeric",month:"short",year:"numeric",timeZone:"UTC"})+" ▾";
  if(occFor!==sel){occFor=sel;loadOcc()}}
 document.addEventListener("click",e=>{
- const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-tg]");if(!b)return;
+ const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-med]");if(!b)return;
  const d=b.dataset;
- if(d.tg)return tgEmbed(b);
+ if(d.med)return embed(b);
  if(d.drop)return drop(d.drop);
  if(d.panel)return showPanel(d.panel);
  if(d.go)return goEv(+d.go);
@@ -202,9 +202,12 @@ function drawOcc(){
    if(pt(f))return l.bindPopup(evPop(p),{maxWidth:360,maxHeight:420});l.bindPopup(`<b>${esc(p.category_label)}</b><br>Source: ${esc(p.source_name)} (map of ${esc(p.snapshot_time)})<br>`+
    (p.period?`Compared with ${esc(p.compared_with)}`:`Original types: ${esc((p.source_labels||[]).join("; "))}`)+`<br>Approx. area: ${esc(p.area_km2_approx.toLocaleString())} km²`)}}).addTo(ol)}
 /* Events panel: each event of the day as claim, confidence and sources; the filters apply to the map and the list alike.
-   Geolocated events are solid dots; approximate ones (place name, oblast centre or AI estimate) are hollow dashed rings;
-   a thick ring means several independent sources. "Show on map" flies there and keeps the panel open. */
-const LOCS={geolocated:"Geolocated",approximate:"Mapped, location approximate",none:"No location found"},CONF=["high","medium","low"],
+   Map symbol: fill = side colour, darker the surer it is that the event happened (occurrence confidence); outline = how
+   sure the location is (solid geolocated, dashed town or area, dotted oblast or region). Events without a clear position
+   are listed but not mapped. "Show on map" flies there and keeps the panel open. */
+const LOCS={geolocated:"Geolocated",place:"Town or area",region:"Oblast or region",none:"Not mapped"},CONF=["high","medium","low"],
+ shade=(c,k)=>{const f={medium:.45,low:.75}[k]||0;return /^#[0-9a-f]{6}$/i.test(c)?"#"+[1,3,5].map(i=>Math.round(parseInt(c.substr(i,2),16)*(1-f)+255*f).toString(16).padStart(2,"0")).join(""):c},   /* mixed with white: medium 45%, low 75% */
+ DASH={geolocated:null,place:"7 5",region:"1 6"},BORD={geolocated:"solid",place:"dashed",region:"dotted",none:"none"},
  tm=t=>t.slice(0,16).replace("T"," ")+" UTC",
  ncat=()=>`${CCAT.filter(c=>eOn["cat|"+c]!==false).length} of ${CCAT.length}`,
  evOk=p=>eOn["loc|"+p.location]!==false&&eOn["conf|"+p.confidence]!==false&&p.claim_sources.some(s=>eOn["src|"+s]!==false)&&p.categories.some(c=>eOn["cat|"+c]!==false);
@@ -213,12 +216,12 @@ function drawEvPanel(){
  const cb=(k,v,l)=>`<label><input type="checkbox" data-ef="${esc(k+"|"+v)}" ${eOn[k+"|"+v]===false?"":"checked"}> ${l}</label> `,
   n=(k,v)=>EV.filter(f=>f.properties[k]==v).length,srcs=[...new Set(EV.flatMap(f=>f.properties.claim_sources))].sort();
  $("#pe").innerHTML=`<div class="mut">Location: ${Object.entries(LOCS).map(([v,l])=>cb("loc",v,`${l} (${n("location",v)})`)).join("")}</div>`+
-  `<div class="mut">Confidence: ${CONF.map(v=>cb("conf",v,`${v} (${n("confidence",v)})`)).join("")}</div>`+
+  `<div class="mut">Occurrence confidence: ${CONF.map(v=>cb("conf",v,`${v} (${n("confidence",v)})`)).join("")}</div>`+
   `<div class="mut">Sources: ${srcs.map(s=>cb("src",s,esc(SRCS[s]?.name||s))).join("")||"none this day"}</div>`+
   `<details class="dd"><summary class="btn">Categories: <span id="ncat">${ncat()}</span> ▾</summary><div class="ov ddl"><button class="btn" data-all="1">All</button> <button class="btn" data-all="0">None</button>`+
   CCAT.map(c=>`<div>${cb("cat",c,`${esc(c)} (${EV.filter(f=>f.properties.categories.includes(c)).length})`)}</div>`).join("")+`</div></details>`+
   `<input id="eq" class="fi" type="search" value="${esc(eq)}" placeholder="Search events (AND, OR, NOT, &quot;phrases&quot;)">`+
-  `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account). Confidence: geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree. Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account).<br><b>Fill</b>: blue Ukraine, red Russia; darker = more confident it happened (geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree).<br><b>Outline</b>: how sure the location is: solid = geolocated, dashed = town or area, dotted = oblast or region. Claims with no clear position (several regions, no place named) are listed but not mapped.<br>Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
  listEv()}
 function listEv(){
  const f=eq.trim()?qparse(eq):null,bad=eq.trim()&&!f,w=f&&f.terms,
@@ -226,15 +229,15 @@ function listEv(){
   items=EV.map((x,i)=>({p:x.properties,i})).filter(x=>evOk(x.p)&&(!f||f(txt(x.p)))).sort((a,b)=>(a.p.time_utc||a.p.date)<(b.p.time_utc||b.p.date)?1:-1);
  drawEv(items);
  $("#elist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${items.length} of ${EV.length} events</p>`+
-  (items.map(({p,i})=>`<div class="row"><span class="dot" style="background:${esc(p.color)}"></span><b>${hl(p.category,w)}</b> <span class="mut">· ${esc(p.confidence)} confidence</span>`+
+  (items.map(({p,i})=>`<div class="row"><span class="dot" style="background:${esc(shade(p.color,p.confidence))};border:2px ${BORD[p.location]} var(--fg)"></span><b>${hl(p.category,w)}</b> <span class="mut">· ${esc(p.confidence)} occurrence confidence</span>`+
    `<div class="mut">${esc(p.time_utc?tm(p.time_utc):p.date)} · ${esc(p.side)} · ${esc(LOCS[p.location])}${p.place?": "+esc(p.place):""}</div>`+
    `<div style="margin-top:4px">${hl((p.claim||"").slice(0,300),w)}</div>`+
    `<div class="mut">${p.claims.length>1?`<b>${p.claims.length} sources:</b> `:"Source: "}${esc([...new Set(p.claims.map(c=>c.source_name))].join(", "))}</div>`+
    `<button class="btn" data-go="${i}" style="margin-top:6px">${EL[i]?"Show on map":"Details"}</button></div>`).join("")||`<p class="mut">No events for this day with these filters.</p>`)}
 function drawEv(items){evl.clearLayers();EL=[];
- items.forEach(({p,i})=>{const g=EV[i].geometry,many=p.claims.length>1;if(!g)return;
-  EL[i]=L.circleMarker([g.coordinates[1],g.coordinates[0]],p.location=="geolocated"?{pane:"markerPane",radius:6,color:many?"#000":"#fff",weight:many?3:1.5,fillColor:p.color,fillOpacity:.9}
-   :{pane:"markerPane",radius:8,color:p.color,weight:many?3:2,dashArray:"3 3",fillColor:p.color,fillOpacity:.15}).bindPopup(evPopE(p),{maxWidth:360,maxHeight:420}).addTo(evl)})}
+ items.forEach(({p,i})=>{const g=EV[i].geometry;if(!g||p.location=="none")return;
+  EL[i]=L.circleMarker([g.coordinates[1],g.coordinates[0]],{pane:"markerPane",radius:7,color:isDark()?"#fff":"#000",weight:p.location=="geolocated"?3:2.5,dashArray:DASH[p.location],lineCap:"round",
+   fillColor:shade(p.color,p.confidence),fillOpacity:1}).bindPopup(evPopE(p),{maxWidth:360,maxHeight:420}).addTo(evl)})}
 function goEv(i){const l=EL[i];
  if(!l)return L.popup({maxWidth:360,maxHeight:420}).setLatLng(map.getCenter()).setContent(evPopE(EV[i].properties)).openOn(map);   /* no location: details only */
  map.once("moveend",()=>l.openPopup());map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5})}
@@ -262,41 +265,44 @@ function qparse(q){
 const hl=(t,ws)=>{if(!ws||!ws.length)return esc(t);
  const re=new RegExp("("+ws.slice().sort((a,b)=>b.length-a.length).map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|")+")","giu");
  return t.split(re).map((x,i)=>i%2?`<mark>${esc(x)}</mark>`:esc(x)).join("")};
-/* Event popup: confidence and location first, then every source's claim separately, earliest first; media only linked */
-const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><div class="mut">${esc(p.confidence)} confidence (${esc(p.confidence_reason)}) · ${esc(LOCS[p.location])}: ${esc(p.precision)}${p.place?`, ${esc(p.place)}`:""}</div>`+
- `<div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${p.claims.length>1?"s, listed separately":""}</div>`+
+/* Event popup: confidence and location, the event's media, then every source's claim separately, earliest first */
+const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><div class="mut">Occurrence: ${esc(p.confidence)} confidence (${esc(p.confidence_reason)})<br>Location: ${esc(LOCS[p.location])} (${esc(p.precision)})${p.place?`, ${esc(p.place)}`:""}</div>`+
+ `<div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${p.claims.length>1?"s, listed separately":""}</div>`+medBtns(p)+
  p.claims.map(c=>`<hr><div class="mut"><b>${esc(c.source_name)}</b> (${esc(c.kind)}) · ${esc(c.side)} · ${esc(c.time_utc?tm(c.time_utc):c.date)}</div><b>${esc(c.category)}</b>`+
   (c.source_category?` <span class="mut">(source's own category: ${esc(c.source_category)})</span>`:"")+`<p style="white-space:pre-line;margin:4px 0">${esc(c.claim||"")}</p>`+
   `<div class="mut">Evidence: ${esc(c.evidence)} · Location: ${esc(c.precision)}${c.place?` (${esc(c.place)})`:""}</div>`+
   ((c.orbat||[]).length?`<b>ORBAT:</b> ${c.orbat.map(esc).join("; ")}<br>`:"")+
   ((c.geolocation||[]).length?`<b>Geolocation:</b><br>${c.geolocation.map(lk).join("<br>")}<br>`:"")+
   ((c.sources||[]).length?`<b>Links:</b><br>${c.sources.map(u=>{const t=(c.source_times||[]).find(x=>x.url==u);return lk(u)+(t&&t.time_utc?` <span class="mut">${esc(tm(t.time_utc))}</span>`:"")+(u==c.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")}<br>`:"")+
-  tgs(c).map(([k,r,l])=>`<div><button class="btn" data-tg="${esc(k)}" data-r="${r||""}" style="margin:4px 0">${esc(l)}</button></div>`).join("")+
   (c.post_text?`<details><summary>Original post text</summary><p style="white-space:pre-line">${esc(c.post_text)}</p></details>`:"")+
   `<a href="${esc(c.link)}" target="_blank" rel="noopener">Open original</a>`).join("")+
  (p.possible_matches.length?`<hr><div class="mut">Possibly the same as ${p.possible_matches.length} other item(s) (one post behind several items; not merged).</div>`:"")+`</div>`;
-/* Telegram posts behind a claim (channel/number), shown only through Telegram's own embed after a click; nothing is copied */
-const tgs=c=>{const o={};[c.link,...(c.sources||[])].forEach(u=>{const m=/t\.me\/(?:s\/)?(\w{4,})\/(\d+)/.exec(u||""),k=m&&m[1]+"/"+m[2];
- if(m&&!(u==c.link&&c.evidence=="text only"))o[k]??=u==c.link?[k,c.media_ratio_pct,"View attached "+((c.evidence||"").match(/video|photo/)||["media"])[0]]:[k,null,"View attached media from "+m[1]]});
- return Object.values(o)};
-/* Show only the channel name and the media: cut the embed off below the media. Sizes from Telegram's widget style
-   (bubble 7px from the left, 12px padding, 19px name line, 12px above the media); the media's shape is saved with each
-   post, else assumed square (cuts no square video; a wide one shows a line of text). "Show full post" removes the cut. */
-function tgEmbed(b){const box=document.createElement("div"),w=document.createElement("div"),s=document.createElement("script"),p=map._popup,o=p&&{...p.options},
-  r=+b.dataset.r||100,W=Math.max(300,Math.min(360,40000/r)),   /* normal popup width; tall media narrower (Telegram's minimum is 300px) */
+/* The event's media from all its sources, copies that play here first (YouTube, X, then Telegram). Telegram videos that
+   Telegram refuses to play outside its app ("too big") only get a link. Nothing loads until a button is clicked. */
+const PLN={yt:"YouTube",x:"X",tg:"Telegram"},
+ medBtns=p=>(p.media||[]).map(m=>`<div>`+(m.too_big?`<a class="btn" href="${esc(m.url)}" target="_blank" rel="noopener" style="display:inline-block;margin:4px 0;text-decoration:none">Watch on Telegram ↗</a> <span class="mut">${esc(m.id.split("/")[0])}: too large to play here</span>`
+  :`<button class="btn" data-med="${esc(m.platform+"|"+m.id+"|"+(m.ratio_pct||""))}" data-kind="${esc(m.kind)}" style="margin:4px 0">View attached ${esc(m.kind)} · ${PLN[m.platform]}${m.platform=="tg"?" "+esc(m.id.split("/")[0]):""}</button>`)+`</div>`).join("");
+/* Telegram: show only the channel name and the media by cutting the embed off below the media. Sizes from Telegram's widget
+   style (bubble 7px from the left, 12px padding, 19px name line, 12px above the media); the media's shape is saved with
+   each post, else assumed square. "Show full post" removes the cut. YouTube: its player. X: X's own post embed. */
+function embed(b){const[pl,id,rr]=b.dataset.med.split("|"),r=+rr||100,box=document.createElement("div"),w=document.createElement("div"),p=map._popup,o=p&&{...p.options},
+  W=pl=="tg"?Math.max(300,Math.min(360,40000/r)):360,   /* normal popup width; tall Telegram media narrower (Telegram's minimum is 300px) */
   btn=(t,f)=>{const x=document.createElement("button");x.className="btn";x.style.margin="4px 4px 4px 0";x.textContent=t;x.onclick=e=>{e.stopPropagation();f()};return x};   /* the click must not reach the map, which would close the popup */
  /* re-measure the popup without re-drawing it (Leaflet 1.9.4): it grows upwards from its marker and the map stays still.
     It is always tall enough to show the whole media at once; other text above may scroll, with the media in view.
     Only if the space above the marker is shorter than the media does the map move, just enough to show them. */
- const fit=()=>{if(!p)return;const need=box.offsetHeight+16,room=map.latLngToContainerPoint(p.getLatLng()).y-80;
+ const fit=()=>{if(!p||!box.isConnected)return;const need=box.offsetHeight+16,room=map.latLngToContainerPoint(p.getLatLng()).y-80;
   p.options.maxHeight=Math.max(need,room);p._updateLayout();p._updatePosition();
   const c=p._contentNode;c.scrollTop+=box.getBoundingClientRect().top-c.getBoundingClientRect().top-8;if(need>room)p._adjustPan()};
  if(p)Object.assign(p.options,{minWidth:W,maxWidth:W});
- const full=btn("Show full post",()=>{w.style.height="";full.remove();fit()});
- box.append(btn("✕ Hide "+b.textContent.replace("View attached ",""),()=>{box.replaceWith(b);if(p){Object.assign(p.options,o);p._updateLayout();p._updatePosition();p._contentNode.scrollTop=0}}),full,w);   /* back to how it first opened; map not moved */
- w.style.cssText=`overflow:hidden;height:${Math.round(43+(W-7)*r/100)}px`;
- Object.assign(s.dataset,{telegramPost:b.dataset.tg,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s);
- b.replaceWith(box);fit()}
+ box.append(btn("✕ Hide "+b.dataset.kind,()=>{box.replaceWith(b);if(p){Object.assign(p.options,o);p._updateLayout();p._updatePosition();p._contentNode.scrollTop=0}}));   /* back to how it first opened; map not moved */
+ if(pl=="tg"){const s=document.createElement("script"),full=btn("Show full post",()=>{w.style.height="";full.remove();fit()});box.append(full);
+  w.style.cssText=`overflow:hidden;height:${Math.round(43+(W-7)*r/100)}px`;
+  Object.assign(s.dataset,{telegramPost:id,width:"100%",userpic:"false"});s.async=true;s.src="https://telegram.org/js/telegram-widget.js?22";w.append(s)}
+ else if(pl=="yt")w.innerHTML=`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}" width="${W}" height="${Math.round(W*9/16)}" style="border:0;display:block" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>`;
+ else (window.twttr?.widgets?Promise.resolve():new Promise(ok=>{const s=document.createElement("script");s.src="https://platform.twitter.com/widgets.js";s.onload=ok;document.head.append(s)}))
+  .then(()=>twttr.widgets.createTweet(id,w,{conversation:"none",dnt:true,width:W,theme:isDark()?"dark":"light"})).then(fit);   /* X's embed grows once loaded */
+ box.append(w);b.replaceWith(box);fit()}
 const lk=u=>/^https?:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`:esc(u);
 const evPop=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category||"")}</b><br><span class="mut">${esc(p.date)}${p.date_note?` (${esc(p.date_note)})`:""} · ${esc(p.side)}</span><p style="white-space:pre-line">${esc(p.description)}</p>`+
  ((p.orbat||[]).length?`<b>ORBAT:</b> ${p.orbat.map(esc).join("; ")}<br>`:"")+

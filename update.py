@@ -648,7 +648,7 @@ def source_time(url, known):
     (one request, 1 s pause, remembered via `known`); others (e.g. Facebook, which needs a login) give none."""
     if url in known:
         return known[url]
-    t, how = None, "not available from this site"
+    t, how, extra = None, "not available from this site", {}
     try:
         if m := re.search(r"(?:twitter|x)\.com/[^/]+/status(?:es)?/(\d+)", url):
             t, how = dt.datetime.fromtimestamp(((int(m.group(1)) >> 22) + 1288834974657) / 1000, dt.timezone.utc), "from the X post ID"
@@ -657,13 +657,16 @@ def source_time(url, known):
         elif m := re.search(r"t\.me/(?:s/)?([A-Za-z0-9_]{4,})/(\d+)", url):
             time.sleep(1)
             page = fetch(f"https://t.me/{m.group(1)}/{m.group(2)}?embed=1&mode=tme", "text/html").decode("utf-8", "replace")
+            head = page[:page.find("tgme_widget_message_text")]   # media come before the text
+            r = re.search(r"padding-top:([\d.]+)%", head)
+            extra = {"media_too_big": "Media is too big" in head, "media_ratio_pct": float(r.group(1)) if r else None}
             if d := re.search(r'<time[^>]*datetime="([^"]+)"', page):
                 t, how = dt.datetime.fromisoformat(d.group(1)).astimezone(dt.timezone.utc), "from the Telegram post page"
             else:
                 how = "Telegram page shows no time (post deleted or private?)"
     except Exception as e:
         how = f"could not be read ({str(e)[:60]})"
-    known[url] = {"url": url, "time_utc": t.isoformat(timespec="seconds") if t else None, "how": how}
+    known[url] = {"url": url, "time_utc": t.isoformat(timespec="seconds") if t else None, "how": how} | extra
     return known[url]
 
 
@@ -841,7 +844,7 @@ COORDS = r"(-?\d{1,2}\.\d{2,})\s*,\s*(-?\d{1,3}\.\d{2,})"
 
 def telegram_posts(page, channel):
     """(post number, publish time, message HTML, attached media types, height of the media block as % of its width, as
-    Telegram gives it) for each post on a t.me/s/<channel> page."""
+    Telegram gives it, and whether Telegram's page says "Media is too big" to play) for each post on a t.me/s/<channel> page."""
     for b in re.split(r'(?=<div class="tgme_widget_message_wrap)', page)[1:]:
         m = re.search(rf'data-post="{channel}/(\d+)"', b)
         t = re.search(r'<time datetime="([^"]+)"', b)
@@ -849,7 +852,8 @@ def telegram_posts(page, channel):
         if m and t and x:
             media = [k for k, pat in (("video", "message_video|roundvideo"), ("photo", "message_photo")) if re.search(pat, b)]
             r = re.search(r"padding-top:([\d.]+)%", b[:x.start()])   # media come before the text
-            yield int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1), media, float(r.group(1)) if r and media else None
+            yield (int(m.group(1)), dt.datetime.fromisoformat(t.group(1)), x.group(1), media, float(r.group(1)) if r and media else None,
+                   "Media is too big" in b[:x.start()])
 
 
 def telegram_recent(cfg, cutoff):
@@ -876,12 +880,12 @@ def run_telegram_posts(sid, cfg, args, day, now, data):
     Merged by post number, so a post read on two runs is saved once."""
     cutoff, found, n = now - dt.timedelta(days=cfg["lookback_days"]), collections.defaultdict(dict), 0
     try:
-        for pid, when, body, media, ratio in telegram_recent(cfg, cutoff):
+        for pid, when, body, media, ratio, big in telegram_recent(cfg, cutoff):
             lines, links = telegram_lines_links(body)
             n += 1
             found[when.date().isoformat()][pid] = {"type": "Feature", "geometry": None, "properties": {
                 "source": sid, "source_name": cfg["name"], "group": cfg["group"], "id": pid, "posted_utc": when.isoformat(),
-                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "media": media, "media_ratio_pct": ratio, "original_html": body}}
+                "link": f"https://t.me/{cfg['channel']}/{pid}", "text": "\n".join(lines), "links": links, "media": media, "media_ratio_pct": ratio, "media_too_big": big, "original_html": body}}
     except Exception as e:
         raise SourceError(f"could not read {cfg['url']}: {e}")
     if args.inspect:
@@ -896,7 +900,7 @@ def run_telegram(sid, cfg, args, day, now, data):
     ch, cutoff = cfg["channel"], now - dt.timedelta(days=cfg["lookback_days"])
     found, n_posts, no_date = collections.defaultdict(dict), 0, 0
     try:
-        for pid, when, body, media, ratio in telegram_recent(cfg, cutoff):
+        for pid, when, body, media, ratio, big in telegram_recent(cfg, cutoff):
             n_posts += 1
             lines, links = telegram_lines_links(body)
             m = lines and re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4}|\d{2})", lines[0])   # 20.09.2026 or 20.09.26
@@ -1033,6 +1037,22 @@ def post_key(url):
     return None
 
 
+def media_of(c):
+    """(post key, media entry) for each link of a claim that can be played through an official embed (YouTube, X,
+    Telegram). Telegram entries say whether Telegram refuses to play them ("too big") and their shape, when known.
+    `found_by` says how the copy was found; other matchers (e.g. the same video on another platform) can add entries."""
+    for u in [c.get("link")] + (c.get("sources") or []):
+        k = post_key(u or "")
+        pl = k and k.split(":")[0]
+        if pl not in ("yt", "x", "tg") or (u == c.get("link") and c.get("evidence") == "text only"):
+            continue
+        info = c if u == c.get("link") else next((x for x in c.get("source_times") or [] if x["url"] == u), {})
+        kind = next((w for w in ("video", "photo") if w in (c.get("evidence") or "")), None) if u == c.get("link") else None
+        yield k, {"url": u, "platform": pl, "id": k.split(":", 1)[1], "kind": kind or ("video" if pl == "yt" else "media"),
+                  "too_big": info.get("media_too_big"), "ratio_pct": info.get("media_ratio_pct"), "from": c.get("source_name"),
+                  "found_by": "linked by the source"}
+
+
 def run_event_builder(sid, cfg, args, day, now, data):
     """Rebuild all events from every claim: GeoConfirmed items (category by rules, geolocated) and claims parsed from posts
     (located by OCHA place names, else the oblast, else Gemini's estimate). Claims citing the same specific post are
@@ -1053,7 +1073,11 @@ def run_event_builder(sid, cfg, args, day, now, data):
         return next((k for k in sorted(by_obl, key=len) if t and (t == k or t.startswith(re.sub("s?ka$", "", k)))), None)
 
     def locate(c):
+        """Where a claim can honestly be put on the map, as (coordinates, precision, place, location level):
+        a named settlement or other specific place ("place"), else one named oblast/region ("region"), else not mapped
+        ("none": several regions, a whole country, or no place named; such claims stay in the list only)."""
         pls = [x for x in c.get("places") or [] if isinstance(x, dict)]
+        ai = c.get("approx_lat") is not None and c.get("approx_lon") is not None
         for pl in pls:
             cands = by_name.get(norm(pl.get("name_uk")), []) or by_name.get(norm(pl.get("name_en")), [])
             o = obl(pl.get("oblast_or_region"))
@@ -1061,16 +1085,21 @@ def run_event_builder(sid, cfg, args, day, now, data):
             if cands:
                 q = min(cands, key=lambda q: {"City": 0, "Settlement": 1}.get(q[2], 2))
                 many = " (name matches several places)" if len({(x[3], x[4]) for x in cands}) > 1 else ""
-                return [q[6], q[5]], "settlement" + many, f"{q[0]} ({q[2]}, {q[3]} raion, {q[4]})"
-        if c.get("approx_lat") is not None and c.get("approx_lon") is not None and any(norm(pl.get("country")) not in ("", "ukraine") for pl in pls):
-            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", ", ".join(str(pl.get("name_en")) for pl in pls)
-        for pl in pls:
-            o = obl(pl.get("oblast_or_region"))
-            if o:
-                return [obl_mid[o][1], obl_mid[o][0]], "oblast only", str(pl.get("oblast_or_region"))
-        if c.get("approx_lat") is not None and c.get("approx_lon") is not None:
-            return [c["approx_lon"], c["approx_lat"]], "approximate (AI estimate)", c.get("location_basis") or ", ".join(str(pl.get("name_en")) for pl in pls)
-        return None, "no location", ""
+                return [q[6], q[5]], "settlement" + many, f"{q[0]} ({q[2]}, {q[3]} raion, {q[4]})", "place"
+        region_key = lambda r: obl(r) or norm(r).replace("oblast", "").replace("region", "")
+        regions = {region_key(pl["oblast_or_region"]) for pl in pls if pl.get("oblast_or_region")}
+        specific = [pl for pl in pls if pl.get("name_en") and not re.search(r"oblast|region|krai|republic", str(pl["name_en"]), re.I)
+                    and region_key(pl["name_en"]) not in regions and norm(pl["name_en"]) != norm(pl.get("country"))]
+        if ai and len(specific) == 1 and len(regions) <= 1:   # one named place not in OCHA's list (e.g. in Russia, or a facility)
+            return [c["approx_lon"], c["approx_lat"]], "place (AI estimate)", str(specific[0]["name_en"]), "place"
+        if len(regions) == 1 and not specific:
+            r = next(iter(regions))
+            name = next(str(pl["oblast_or_region"]) for pl in pls if pl.get("oblast_or_region"))
+            if r in obl_mid:
+                return [obl_mid[r][1], obl_mid[r][0]], "oblast (centre)", name, "region"
+            if ai:
+                return [c["approx_lon"], c["approx_lat"]], "region (AI estimate)", name, "region"
+        return None, "not mapped: " + ("several regions" if len(regions) > 1 or len(specific) > 1 else "no specific place named"), "", "none"
 
     lvl, rules = cfg["confidence_from_evidence"], [(re.compile(r), c) for r, c in cfg["geoconfirmed_categories"]]
     claims = {}
@@ -1080,7 +1109,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
             claims[f"geoconfirmed:{p['id']}"] = {"source": "geoconfirmed", "source_name": p["source_name"], "kind": "geolocated database",
                 "category": next(c for r, c in rules if r.search((p.get("category") or "").lower())), "claim": p.get("description") or p.get("category"),
                 "source_category": p.get("category"), "side": p.get("side"), "color": p.get("color"), "date": p["date"],
-                "time_utc": p.get("earliest_source_utc"), "coords": x["geometry"]["coordinates"], "precision": "geolocated", "place": "",
+                "time_utc": p.get("earliest_source_utc"), "coords": x["geometry"]["coordinates"], "precision": "geolocated", "place": "", "loc": "geolocated",
                 "evidence": "geolocated footage", "link": p.get("link"), "sources": p.get("sources", []), "source_times": p.get("source_times"),
                 "earliest_source_url": p.get("earliest_source_url"), "geolocation": p.get("geolocation"), "orbat": p.get("orbat", []),
                 "keys": {k for k in map(post_key, [p.get("link")] + p.get("sources", [])) if k}}
@@ -1094,14 +1123,14 @@ def run_event_builder(sid, cfg, args, day, now, data):
             media = p.get("media") or []
             ev = "video in the post" if "video" in media else "photo in the post" if "photo" in media else "text only"
             for i, c in enumerate(r["claims"]):
-                coords, prec, place = locate(c)
+                coords, prec, place, loc = locate(c)
                 side = str(c.get("claimant_side") or "")
                 claims[f"{k}#{i}"] = {"source": k.split(":")[0], "source_name": p["source_name"], "kind": "official claim",
                     "category": c["category"], "claim": c["claim"], "side": f"{side} (official)",
                     "color": "#0051CA" if side.lower().startswith("ukr") else "#E00000" if side.lower().startswith("rus") else "#666666",
-                    "date": (c.get("date") or p["posted_utc"])[:10], "time_utc": p["posted_utc"], "coords": coords, "precision": prec,
+                    "date": (c.get("date") or p["posted_utc"])[:10], "time_utc": p["posted_utc"], "coords": coords, "precision": prec, "loc": loc,
                     "place": place, "evidence": ev, "link": p["link"], "sources": [u for u in p.get("links", []) if post_key(u)],
-                    "post_text": p["text"], "media_ratio_pct": p.get("media_ratio_pct"), "keys": {k2 for k2 in map(post_key, [p["link"]] + p.get("links", [])) if k2}}
+                    "post_text": p["text"], "media_ratio_pct": p.get("media_ratio_pct"), "media_too_big": p.get("media_too_big"), "keys": {k2 for k2 in map(post_key, [p["link"]] + p.get("links", [])) if k2}}
     by_key = collections.defaultdict(list)
     for c, v in claims.items():
         for k in v["keys"]:
@@ -1126,8 +1155,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
         ga |= gb
         for c in gb:
             group[c] = ga
-    rank = lambda c: (0 if c["precision"] == "geolocated" else 1 if c["precision"].startswith("settlement") else 2 if c["precision"] == "oblast only"
-                      else 3 if c["coords"] else 4, -lvl[c["evidence"]])
+    rank = lambda c: ({"geolocated": 0, "place": 1, "region": 2, "none": 3}[c["loc"]], -lvl[c["evidence"]])
     events = collections.defaultdict(list)
     for g in {id(g): g for g in group.values()}.values():
         members = sorted(g, key=lambda c: (claims[c]["time_utc"] or claims[c]["date"] + "T23:59", c))
@@ -1138,15 +1166,20 @@ def run_event_builder(sid, cfg, args, day, now, data):
         if len(srcs) > 1:
             level, reason = min(2, level + 1), f"{reason}; reported by {len(srcs)} independent sources"
         out = [{k: v for k, v in claims[c].items() if k != "keys"} | {"key": c} for c in members]
+        media = {}
+        for c in out:
+            for k, m in media_of(c):
+                media.setdefault(k, m)
         events[min(claims[c]["date"] for c in members)].append({"type": "Feature",
             "geometry": {"type": "Point", "coordinates": lead["coords"]} if lead["coords"] else None, "properties": {
             "source": sid, "source_name": cfg["name"], "id": "ev-" + hashlib.sha1(members[0].encode()).hexdigest()[:10],
             "date": min(claims[c]["date"] for c in members), "time_utc": next((claims[c]["time_utc"] for c in members if claims[c]["time_utc"]), None),
             "category": lead["category"], "categories": sorted({claims[c]["category"] for c in members}), "claim": lead["claim"],
             "side": lead["side"], "color": lead["color"], "confidence": cfg["levels"][level], "confidence_reason": reason,
-            "location": "geolocated" if lead["precision"] == "geolocated" else "approximate" if lead["coords"] else "none",
+            "location": lead["loc"],   # location confidence: geolocated / place (town or area) / region (oblast or larger) / none (not mapped)
             "precision": lead["precision"], "place": lead["place"], "claim_sources": sorted(srcs), "claims": out,
-            "possible_matches": sorted({o for c in members for o in possible.get(c, ())} - set(members))}})
+            "possible_matches": sorted({o for c in members for o in possible.get(c, ())} - set(members)),
+            "media": sorted(media.values(), key=lambda m: (m["too_big"] is True, {"yt": 0, "x": 1, "tg": 2}[m["platform"]]))}})
     fn = KIND_FILENAMES[cfg["kind"]]
     for d, feats in sorted(events.items()):
         put_in_place(args, data, d, sid, fn, sorted(feats, key=lambda e: e["properties"]["id"]))
