@@ -58,7 +58,7 @@ CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
 CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
-SEAM_CLOSE_DEGREES = 0.00001   # about 1 m: closes hairline seams when merging shapes for the map (no simplifying)
+SEAM_CLOSE_DEGREES = 0.000027   # 3 m north-south (about 2 m east-west in Ukraine): closes seams when merging shapes for the map (user, 2026-10-14)
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
     "official_ua": "Official Ukrainian",
@@ -379,9 +379,9 @@ def classify(label, props, rules):
 
 
 def xy(c):
-    """Keep only [lon, lat] (drop any height value) and round to about 1 m."""
+    """Keep only [lon, lat] (drop any height value), at full precision (no rounding)."""
     if isinstance(c[0], (int, float)):
-        return [round(c[0], 5), round(c[1], 5)]
+        return [c[0], c[1]]
     return [xy(x) for x in c]
 
 
@@ -1378,7 +1378,7 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
     left_off = {c: sorted(labels[c]) for c in labels if c in hidden}
     entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra, "files": [f"{sid}/{filename}"],
              "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
-             "processing": "merged per category, seams closed (~1 m), no simplifying; original archived unchanged"}
+             "processing": "merged per category, seams closed (3 m N-S, about 2 m E-W), no simplifying or rounding; original archived unchanged"}
     if left_off:
         entry["left_off_map"] = left_off
     save_meta(data, day, sid, entry)
