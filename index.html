@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Ukraine OSINT Dashboard</title>
+<link rel="icon" type="image/png" href="art/logo_version_1_square.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/proj4@2.9.2/dist/proj4.js"></script>
@@ -52,6 +53,7 @@ body.pan #map{right:460px}body.pan #rt{right:470px}
 .ly{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 .fi{width:100%;padding:6px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--card)}
+.fg{margin:0 0 8px;font-size:13px}.fg label{display:block;color:var(--mut)}.ddl .btn{margin-bottom:6px}
 .dd{margin:6px 0}.dd summary{display:inline-block;list-style:none}.ddl{padding:8px;margin:4px 0;max-height:50vh;overflow:auto}
 .res button{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--bd);background:none;padding:6px 4px}
 /* Dark mode: darken only the OSM map images (areas and dots keep their colours); nothing extra is requested from OSM */
@@ -215,11 +217,12 @@ function drawEvPanel(){
  CCAT=[...new Set(CCAT.concat(EV.flatMap(f=>f.properties.categories)))];   /* the fixed list, plus any other category found in the data */
  const cb=(k,v,l)=>`<label><input type="checkbox" data-ef="${esc(k+"|"+v)}" ${eOn[k+"|"+v]===false?"":"checked"}> ${l}</label> `,
   n=(k,v)=>EV.filter(f=>f.properties[k]==v).length,srcs=[...new Set(EV.flatMap(f=>f.properties.claim_sources))].sort();
- $("#pe").innerHTML=`<div class="mut">Location: ${Object.entries(LOCS).map(([v,l])=>cb("loc",v,`${l} (${n("location",v)})`)).join("")}</div>`+
-  `<div class="mut">Occurrence confidence: ${CONF.map(v=>cb("conf",v,`${v} (${n("confidence",v)})`)).join("")}</div>`+
-  `<div class="mut">Sources: ${srcs.map(s=>cb("src",s,esc(SRCS[s]?.name||s))).join("")||"none this day"}</div>`+
-  `<details class="dd"><summary class="btn">Categories: <span id="ncat">${ncat()}</span> ▾</summary><div class="ov ddl"><button class="btn" data-all="1">All</button> <button class="btn" data-all="0">None</button>`+
-  CCAT.map(c=>`<div>${cb("cat",c,`${esc(c)} (${EV.filter(f=>f.properties.categories.includes(c)).length})`)}</div>`).join("")+`</div></details>`+
+ /* filters: one group per heading, options listed underneath */
+ $("#pe").innerHTML=`<div class="fg"><b>Location</b>${Object.entries(LOCS).map(([v,l])=>cb("loc",v,`${l} (${n("location",v)})`)).join("")}</div>`+
+  `<div class="fg"><b>Occurrence confidence</b>${CONF.map(v=>cb("conf",v,`${v} (${n("confidence",v)})`)).join("")}</div>`+
+  `<div class="fg"><b>Sources</b>${srcs.map(s=>cb("src",s,esc(SRCS[s]?.name||s))).join("")||"none this day"}</div>`+
+  `<details class="dd fg"><summary class="btn">Categories: <span id="ncat">${ncat()}</span> ▾</summary><div class="ov ddl"><button class="btn" data-all="1">Select all</button> <button class="btn" data-all="0">Deselect all</button>`+
+  CCAT.map(c=>cb("cat",c,`${esc(c)} (${EV.filter(f=>f.properties.categories.includes(c)).length})`)).join("")+`</div></details>`+
   `<input id="eq" class="fi" type="search" value="${esc(eq)}" placeholder="Search events (AND, OR, NOT, &quot;phrases&quot;)">`+
   `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account).<br><b>Fill</b>: blue Ukraine, red Russia; darker = more confident it happened (geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree).<br><b>Outline</b>: how sure the location is: solid = geolocated, dashed = town or area, dotted = oblast or region. Claims with no clear position (several regions, no place named) are listed but not mapped.<br>Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
  listEv()}
