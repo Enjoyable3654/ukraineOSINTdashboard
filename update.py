@@ -513,11 +513,16 @@ def compute_changes(sid, cfg, args, data, days):
     "lost" = became Ukrainian-held (R->U, C->U), merged where touching; "occupied_to_contested" (R->C) and
     "ukrainian_to_contested" (U->C). Saved as polygons/change_<period>.geojson; the area of each of the six
     transitions goes in meta.json under "change_stats" so the map can total them either way. Every change is kept, however small (the
-    sources' maps are drawn by people; nothing is filtered out)."""
+    sources' maps are drawn by people; nothing is filtered out). The day-to-day changes, each of the six transitions
+    separately, are also kept together in data/history/<source>_control_changes.geojson.gz (derived), so the page can
+    find the last time a spot changed control with one download."""
     if not HAVE_SHAPELY:
         return print(f"[{sid}] change layers skipped: shapely is not installed")
-    fn, cache = KIND_FILENAMES[cfg["kind"]], {}
+    fn, cache, hist = KIND_FILENAMES[cfg["kind"]], {}, {}
     empty = shape({"type": "Polygon", "coordinates": []})
+    # comparing two maps can also give zero-width lines and points where borders touch; they have no area, so only the
+    # area parts are kept (every area, however small, stays)
+    polys = lambda g: g if g.geom_type != "GeometryCollection" else unary_union([p for p in g.geoms if p.area > 0] or [empty])
 
     def areas(d):   # (occupied, contested) shapes of day d, or None if the day has no saved map
         if d not in cache:
@@ -541,9 +546,9 @@ def compute_changes(sid, cfg, args, data, days):
                 continue
             rt, ct = areas(then)
             hn, ht = rn.union(cn), rt.union(ct)   # held = occupied or contested
-            t = {"u2r": rn.difference(ht), "c2r": rn.intersection(ct), "u2c": cn.difference(ht),
-                 "r2c": rt.intersection(cn), "r2u": rt.difference(hn), "c2u": ct.difference(hn)}
-            shapes = {"gained": rn.difference(rt), "lost": ht.difference(hn),
+            t = {k: polys(g) for k, g in {"u2r": rn.difference(ht), "c2r": rn.intersection(ct), "u2c": cn.difference(ht),
+                 "r2c": rt.intersection(cn), "r2u": rt.difference(hn), "c2u": ct.difference(hn)}.items()}
+            shapes = {"gained": polys(rn.difference(rt)), "lost": polys(ht.difference(hn)),
                       "occupied_to_contested": t["r2c"], "ukrainian_to_contested": t["u2c"]}
             feats = []
             for cat, g in shapes.items():
@@ -555,10 +560,20 @@ def compute_changes(sid, cfg, args, data, days):
                     "category_label": CATEGORIES[cat]["label"], "period": period, "compared_with": then,
                     "snapshot_time": d, "area_km2_approx": km2(g)}})
             meta["change_stats"][period] = {"compared_with": then, "km2": {k: km2(g) for k, g in t.items()}}
+            if period == "1d":
+                hist[d] = [(k, g, then) for k, g in t.items() if not g.is_empty]
             name = f"polygons/change_{period}.geojson"
             put_in_place(args, data, d, sid, name, feats)
             meta["files"].append(f"{sid}/{name}")
         save_meta(data, d, sid, meta)
+    hf = data / "history" / f"{sid}_control_changes.geojson.gz"
+    hf.parent.mkdir(exist_ok=True)
+    feats = [x for x in read_json(hf, {"features": []})["features"] if x["properties"]["date"] not in hist] + [
+        {"type": "Feature", "geometry": {"type": m["type"], "coordinates": xy(m["coordinates"])},
+         "properties": {"date": d, "compared_with": then, "change": k}}
+        for d, items in hist.items() for k, g, then in items if not g.is_empty for m in [mapping(g)]]
+    write_json(hf, {"type": "FeatureCollection", "source": sid, "derived": "day-to-day control changes (all six transitions)",
+                    "features": sorted(feats, key=lambda x: (x["properties"]["date"], x["properties"]["change"]))})
     print(f"[{sid}] change layers rebuilt for {len(days)} days")
 
 
