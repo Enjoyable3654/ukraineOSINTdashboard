@@ -137,7 +137,7 @@ document.addEventListener("click",e=>{
  if(d.all){CCAT.forEach(c=>eOn["cat|"+c]=d.all=="1");document.querySelectorAll('[data-ef^="cat|"]').forEach(i=>i.checked=d.all=="1");$("#ncat").textContent=ncat();return listEv()}
  if(d.pl)return goPlace(+d.pl);
  if(d.m){const t=new Date(Date.UTC(view[0],view[1]+ +d.m,1));view=[t.getUTCFullYear(),t.getUTCMonth()]}
- else if(d.d){sel=d.d;drop(null)}
+ else if(d.d){sel=d.d;drop(null);const t=new Date(sel+"T00:00:00Z");view=[t.getUTCFullYear(),t.getUTCMonth()]}
  else{const k=key(new Date(sel+"T00:00:00Z").getTime()+d.step*864e5);if(!A[k])return;sel=k;const t=new Date(k+"T00:00:00Z");view=[t.getUTCFullYear(),t.getUTCMonth()]}
  render()});
 document.addEventListener("keydown",e=>{if(e.key=="Escape"){drop(null);if(panel)showPanel(panel)}});
@@ -244,6 +244,23 @@ function drawEv(items){evl.clearLayers();EL=[];
 function goEv(i){const l=EL[i];
  if(!l)return L.popup({maxWidth:360,maxHeight:420}).setLatLng(map.getCenter()).setContent(evPopE(EV[i].properties)).openOn(map);   /* no location: details only */
  map.once("moveend",()=>l.openPopup());map.flyTo(l.getLatLng(),Math.max(map.getZoom(),11),{duration:1.5})}
+/* Right-click (long-press on phones): when did this spot last change control, up to the selected day? Each ticked area
+   source answers on its own (never merged), from its day-to-day change history (data/history/, derived, every change kept). */
+const HIST={},CHG={u2r:"became Russian-occupied (was Ukrainian-held)",c2r:"became Russian-occupied (was contested)",u2c:"became contested (was Ukrainian-held)",
+  r2c:"became contested (was Russian-occupied)",r2u:"became Ukrainian-held (was Russian-occupied)",c2u:"became Ukrainian-held (was contested)"},
+ inRing=(p,r)=>{let c=false;for(let i=0,j=r.length-1;i<r.length;j=i++){const[xi,yi]=r[i],[xj,yj]=r[j];if((yi>p[1])!=(yj>p[1])&&p[0]<(xj-xi)*(p[1]-yi)/(yj-yi)+xi)c=!c}return c},
+ inPoly=(p,pg)=>inRing(p,pg[0])&&!pg.slice(1).some(h=>inRing(p,h)),
+ inGeom=(p,g)=>g.type=="Polygon"?inPoly(p,g.coordinates):g.coordinates.some(pg=>inPoly(p,pg)),
+ fday=k=>new Date(k+"T00:00:00Z").toLocaleDateString("en",{day:"numeric",month:"short",year:"numeric",timeZone:"UTC"});
+map.on("contextmenu",async e=>{const p=[e.latlng.lng,e.latlng.lat],day=sel,
+  srcs=Object.keys(SRCS).filter(s=>["deepstate","ukrdaily"].includes(s)&&occOn[s]!==false),
+  pop=L.popup({maxWidth:320}).setLatLng(e.latlng).setContent("Looking up the last change of control…").openOn(map);
+ const rows=await Promise.all(srcs.map(async s=>{const nm=esc(SRCS[s].name);
+  try{HIST[s]??=await getJson(`data/history/${s}_control_changes.geojson.gz`)}catch(x){delete HIST[s];return`<b>${nm}</b>: history could not be loaded.`}
+  const fs=HIST[s].features,hit=fs.filter(f=>f.properties.date<=day&&inGeom(p,f.geometry)).pop();   /* sorted by date: the last match is the latest */
+  return hit?`<b>${nm}</b>: ${CHG[hit.properties.change]} on <b>${fday(hit.properties.date)}</b> <span class="mut">(vs ${fday(hit.properties.compared_with)})</span><br><button class="btn" data-d="${hit.properties.date}" style="margin:4px 0">Go to ${fday(hit.properties.date)}</button>`
+   :`<b>${nm}</b>: no change here between ${fday(fs.length?fs[0].properties.compared_with:day)} (start of our records) and ${fday(day)}.`}));
+ pop.setContent(`<div style="overflow-wrap:anywhere">${rows.join("<hr>")||"Tick DeepStateMap or UkrDailyUpdate under Layers to use this."}</div>`)});
 /* Place search: OCHA settlement names (English or Ukrainian), loaded the first time you type */
 let PLACES=null,pmark=null,pres=[];
 async function findPlace(q){

@@ -542,6 +542,11 @@ def compute_changes(sid, cfg, args, data, days):
         rn, cn = areas(d)
         for period, n in CHANGE_PERIODS.items():
             then = (dt.date.fromisoformat(d) - dt.timedelta(n)).isoformat()
+            if period == "1d":   # no map the day before: compare with the latest earlier map, so no change is ever missed
+                for k in range(2, 31):
+                    if areas(then) is not None:
+                        break
+                    then = (dt.date.fromisoformat(d) - dt.timedelta(k)).isoformat()
             if areas(then) is None:
                 continue
             rt, ct = areas(then)
