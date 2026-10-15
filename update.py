@@ -59,7 +59,6 @@ CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
 CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
 SEAM_CLOSE_DEGREES = 0.00001   # about 1 m: closes hairline seams when merging shapes for the map (no simplifying)
-CHANGE_MIN_WIDTH_DEGREES = 0.0003   # about 30 m: thinner slivers in the derived change layers are line redrawing, not real change
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
     "official_ua": "Official Ukrainian",
@@ -513,11 +512,11 @@ def compute_changes(sid, cfg, args, data, days):
     Ukrainian-held (U), contested (C) or occupied (R). Drawn: "gained" = became occupied (U->R, C->R);
     "lost" = became Ukrainian-held (R->U, C->U), merged where touching; "occupied_to_contested" (R->C) and
     "ukrainian_to_contested" (U->C). Saved as polygons/change_<period>.geojson; the area of each of the six
-    transitions goes in meta.json under "change_stats" so the map can total them either way. Slivers thinner
-    than CHANGE_MIN_WIDTH_DEGREES are dropped from this derived layer (mostly line redrawing, not real change)."""
+    transitions goes in meta.json under "change_stats" so the map can total them either way. Every change is kept, however small (the
+    sources' maps are drawn by people; nothing is filtered out)."""
     if not HAVE_SHAPELY:
         return print(f"[{sid}] change layers skipped: shapely is not installed")
-    fn, eps, cache = KIND_FILENAMES[cfg["kind"]], CHANGE_MIN_WIDTH_DEGREES, {}
+    fn, cache = KIND_FILENAMES[cfg["kind"]], {}
     empty = shape({"type": "Polygon", "coordinates": []})
 
     def areas(d):   # (occupied, contested) shapes of day d, or None if the day has no saved map
@@ -528,7 +527,6 @@ def compute_changes(sid, cfg, args, data, days):
             cache[d] = (unary_union(g["russia"]), unary_union(g["contested"]) if g["contested"] else empty) if g["russia"] else None
         return cache[d]
 
-    clean = lambda g: g.buffer(-eps, join_style="mitre").buffer(eps, join_style="mitre")
     km2 = lambda g: 0 if g.is_empty else round(polygons_area_km2((lambda m: m["coordinates"] if m["type"] == "MultiPolygon"
                                                                    else [m["coordinates"]])(mapping(g))), 1)
     for d in days:
@@ -543,9 +541,9 @@ def compute_changes(sid, cfg, args, data, days):
                 continue
             rt, ct = areas(then)
             hn, ht = rn.union(cn), rt.union(ct)   # held = occupied or contested
-            t = {"u2r": clean(rn.difference(ht)), "c2r": clean(rn.intersection(ct)), "u2c": clean(cn.difference(ht)),
-                 "r2c": clean(rt.intersection(cn)), "r2u": clean(rt.difference(hn)), "c2u": clean(ct.difference(hn))}
-            shapes = {"gained": clean(rn.difference(rt)), "lost": clean(ht.difference(hn)),
+            t = {"u2r": rn.difference(ht), "c2r": rn.intersection(ct), "u2c": cn.difference(ht),
+                 "r2c": rt.intersection(cn), "r2u": rt.difference(hn), "c2u": ct.difference(hn)}
+            shapes = {"gained": rn.difference(rt), "lost": ht.difference(hn),
                       "occupied_to_contested": t["r2c"], "ukrainian_to_contested": t["u2c"]}
             feats = []
             for cat, g in shapes.items():
