@@ -524,7 +524,7 @@ def compute_changes(sid, cfg, args, data, days):
     empty = shape({"type": "Polygon", "coordinates": []})
     # comparing two maps can also give zero-width lines and points where borders touch; they have no area, so only the
     # area parts are kept (every area, however small, stays)
-    polys = lambda g: g if g.geom_type != "GeometryCollection" else unary_union([p for p in g.geoms if p.area > 0] or [empty])
+    polys = lambda g: g if g.geom_type in ("Polygon", "MultiPolygon") else unary_union([p for p in getattr(g, "geoms", [g]) if p.area > 0] or [empty])
 
     def areas(d):   # (occupied, contested) shapes of day d, or None if the day has no saved map
         if d not in cache:
