@@ -58,6 +58,8 @@ CATEGORIES = {   # shared by all sources; "color_dark"/"outline" are used by the
 
 # Change layers: each area source's Russian-occupied area compared with this many days earlier.
 CHANGE_PERIODS = {"1d": 1, "7d": 7, "30d": 30}
+GRID_DEGREES = 1e-9   # about 0.1 mm: shape cutting is done on this grid, 100x finer than the sources draw (1 cm), so the
+                      # computer's own arithmetic noise does not show up as zero-width "changes" (user, 2026-10-16)
 SEAM_CLOSE_DEGREES = 0.000027   # 3 m north-south (about 2 m east-west in Ukraine): closes seams when merging shapes for the map (user, 2026-10-14)
 
 POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one in its "group"
@@ -529,7 +531,8 @@ def compute_changes(sid, cfg, args, data, days):
             f, g = read_json(data / d / sid / fn, None), collections.defaultdict(list)
             for x in (f or {"features": []})["features"]:
                 g[x["properties"]["category"]].append(force_2d(shape(x["geometry"])).buffer(0))
-            cache[d] = (unary_union(g["russia"]), unary_union(g["contested"]) if g["contested"] else empty) if g["russia"] else None
+            r = unary_union(g["russia"]) if g["russia"] else None
+            cache[d] = (r, unary_union(g["contested"]) if g["contested"] else empty) if r is not None else None
         return cache[d]
 
     km2 = lambda g: 0 if g.is_empty else round(polygons_area_km2((lambda m: m["coordinates"] if m["type"] == "MultiPolygon"
@@ -550,10 +553,14 @@ def compute_changes(sid, cfg, args, data, days):
             if areas(then) is None:
                 continue
             rt, ct = areas(then)
-            hn, ht = rn.union(cn), rt.union(ct)   # held = occupied or contested
-            t = {k: polys(g) for k, g in {"u2r": rn.difference(ht), "c2r": rn.intersection(ct), "u2c": cn.difference(ht),
-                 "r2c": rt.intersection(cn), "r2u": rt.difference(hn), "c2u": ct.difference(hn)}.items()}
-            shapes = {"gained": polys(rn.difference(rt)), "lost": polys(ht.difference(hn)),
+            # one status per spot: occupied > contested > Ukrainian-held. Each category is first compared with itself
+            # across the two days (unchanged edges cancel exactly), then what changed is sorted by the other category.
+            D = lambda x, y: polys(x.difference(y, grid_size=GRID_DEGREES))
+            I = lambda x, y: polys(x.intersection(y, grid_size=GRID_DEGREES))
+            r_new, r_old, c_new, c_old = D(rn, rt), D(rt, rn), D(cn, ct), D(ct, cn)
+            t = {"u2r": D(r_new, ct), "c2r": I(r_new, ct), "u2c": D(D(c_new, rn), rt), "r2c": I(r_old, cn),
+                 "r2u": D(r_old, cn), "c2u": D(D(c_old, rt), rn)}
+            shapes = {"gained": r_new, "lost": polys(unary_union([t["r2u"], t["c2u"]])),
                       "occupied_to_contested": t["r2c"], "ukrainian_to_contested": t["u2c"]}
             feats = []
             for cat, g in shapes.items():
@@ -1375,7 +1382,8 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
     """Map layer: for each category, all of the source's polygons merged into one clean shape (hairline seams
     closed), with full coordinate precision and no simplifying. Saved as polygons/occupation.geojson.gz. The
     original download is archived unchanged next to it. Categories the user chose to leave off the map are not
-    drawn (they stay in the archived original and are listed by name in meta.json)."""
+    drawn (they stay in the archived original and are listed by name in meta.json). Each spot has one status:
+    occupied wins over contested (where the source drew both, the contested shape is cut back; user, 2026-10-16)."""
     hidden, groups, labels = set(cfg.get("leave_off_map", [])), collections.defaultdict(list), collections.defaultdict(set)
     for f, label, cat in feats:
         labels[cat].add(label)
@@ -1384,9 +1392,12 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
     if not groups:
         raise SourceError(f"{day}: no polygons left to show; nothing saved (existing data left untouched).")
     out, by_cat = [], {}
+    merged = {cat: unary_union(gs).buffer(SEAM_CLOSE_DEGREES, join_style="mitre").buffer(-SEAM_CLOSE_DEGREES, join_style="mitre")
+              for cat, gs in groups.items()}
+    if "russia" in merged and "contested" in merged:   # occupied > contested > Ukrainian-held: nothing is both
+        merged["contested"] = merged["contested"].difference(merged["russia"], grid_size=GRID_DEGREES)
     for cat, gs in groups.items():
-        g = unary_union(gs)
-        g = g.buffer(SEAM_CLOSE_DEGREES, join_style="mitre").buffer(-SEAM_CLOSE_DEGREES, join_style="mitre")
+        g = merged[cat]
         m, area = mapping(g), area_km2(g)
         by_cat[cat] = {"source_polygons": len(gs), "area_km2_approx": round(area)}
         out.append({"type": "Feature", "geometry": {"type": m["type"], "coordinates": m["coordinates"]}, "properties": {
@@ -1398,7 +1409,7 @@ def save_areas(sid, cfg, args, day, now, data, feats, extra):
     left_off = {c: sorted(labels[c]) for c in labels if c in hidden}
     entry = {"status": "ok", "fetched_at_utc": now.isoformat(timespec="seconds"), **extra, "files": [f"{sid}/{filename}"],
              "by_category": by_cat, "unmapped_labels": sorted(labels.get("unmapped", [])),
-             "processing": "merged per category, seams closed (3 m N-S, about 2 m E-W), no simplifying or rounding; original archived unchanged"}
+             "processing": "merged per category, seams closed (3 m N-S, about 2 m E-W), contested cut back where also occupied, no simplifying or rounding; original archived unchanged"}
     if left_off:
         entry["left_off_map"] = left_off
     save_meta(data, day, sid, entry)
