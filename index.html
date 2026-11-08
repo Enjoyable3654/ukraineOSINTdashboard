@@ -87,8 +87,8 @@ body.pan #map{right:460px}body.pan #rt{right:470px}
   <div id="gs" class="mut" style="margin-top:4px">Files are read in your browser and never uploaded. You can also drop them on the map.</div><div id="lyrs"></div>
  </div>
 </div>
-<div id="rt" class="ov"><button class="btn" data-panel="ev">Events</button></div>
-<aside id="panel" class="ov" hidden><div id="pe" class="pb"></div></aside>
+<div id="rt" class="ov"><button class="btn" data-panel="ev">Events</button> <button class="btn" data-panel="po">Posts</button></div>
+<aside id="panel" class="ov" hidden><div id="pe" class="pb"></div><div id="pp" class="pb" hidden></div></aside>
 <p id="tn" class="ov" hidden></p>
 <script>
 const $=s=>document.querySelector(s);
@@ -114,7 +114,7 @@ const now=new Date();let sel=key(now),view=[now.getUTCFullYear(),now.getUTCMonth
 const DROPS=["calbox","sres","sumbox","lay"],drop=id=>DROPS.forEach(d=>$("#"+d).hidden=d!==id||!$("#"+d).hidden);
 /* right panel (events): opening it squeezes the map; it keeps its scroll position while hidden */
 let panel=null;
-const showPanel=p=>{panel=p===panel?null:p;$("#panel").hidden=!panel;
+const showPanel=p=>{panel=p===panel?null:p;$("#panel").hidden=!panel;$("#pe").hidden=panel!="ev";$("#pp").hidden=panel!="po";if(panel=="po")loadPosts();
  document.body.classList.toggle("pan",!!panel);map.invalidateSize();
  document.querySelectorAll("[data-panel]").forEach(b=>b.classList.toggle("on",b.dataset.panel==panel))};
 function cal(){
@@ -128,9 +128,10 @@ function render(){
  $("#dbtn").textContent=new Date(sel+"T00:00:00Z").toLocaleDateString("en",{weekday:"short",day:"numeric",month:"short",year:"numeric",timeZone:"UTC"})+" ▾";
  if(occFor!==sel){occFor=sel;loadOcc()}}
 document.addEventListener("click",e=>{
- const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-med]");if(!b)return;
+ const b=e.target.closest("[data-m],[data-d],[data-step],[data-drop],[data-panel],[data-go],[data-pl],[data-all],[data-pall],[data-med]");if(!b)return;
  const d=b.dataset;
  if(d.med)return embed(b);
+ if(d.pall){document.querySelectorAll('[data-pf^="c|"]').forEach(i=>{i.checked=d.pall=="1";pOn[i.dataset.pf]=i.checked});return listPo()}
  if(d.drop)return drop(d.drop);
  if(d.panel)return showPanel(d.panel);
  if(d.go)return goEv(+d.go);
@@ -142,8 +143,9 @@ document.addEventListener("click",e=>{
  render()});
 document.addEventListener("keydown",e=>{if(e.key=="Escape"){drop(null);if(panel)showPanel(panel)}});
 document.addEventListener("change",e=>{const d=e.target.dataset;if(d.oc){occOn[d.oc]=e.target.checked;drawOcc()}if(e.target.id=="cp"){occP=e.target.value;drawOcc()}if(e.target.id=="cc"){incC=e.target.checked;drawOcc()}
- if(d.ef){eOn[d.ef]=e.target.checked;if(d.ef.startsWith("cat|"))$("#ncat").textContent=ncat();listEv()}});
-document.addEventListener("input",e=>{if(e.target.id=="eq"){eq=e.target.value;listEv()}if(e.target.id=="ps")findPlace(e.target.value)});
+ if(d.ef){eOn[d.ef]=e.target.checked;if(d.ef.startsWith("cat|"))$("#ncat").textContent=ncat();listEv()}
+ if(d.pf){pOn[d.pf]=e.target.checked;listPo()}});
+document.addEventListener("input",e=>{if(e.target.id=="eq"){eq=e.target.value;listEv()}if(e.target.id=="pq"){pq=e.target.value;listPo()}if(e.target.id=="ps")findPlace(e.target.value)});
 
 /* Map data from data/<date>/<source>/..., built by the daily job */
 map.createPane("occ").style.zIndex=450;
@@ -157,7 +159,7 @@ async function loadOcc(){
  const day=sel;OCC=null;EV=[];META={};
  try{
   if(!Object.keys(CATS).length)CATS=(await(await get("data/categories.json")).json()).categories;
-  if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;CCAT=j.claim_categories||[]}
+  if(!Object.keys(SRCS).length){const j=await(await get("data/sources.json")).json();SRCS=j.sources;CCAT=j.claim_categories||[];PG=j.post_groups||{}}
   const meta=await(await get(`data/${day}/meta.json`)).json();META=meta.sources||{};
   /* each source lists its files in meta.json as <source>/<data type>/<specific data>.geojson; events are kept apart (some have no location) */
   const files=Object.values(meta.sources||{}).filter(s=>s.status==="ok").flatMap(s=>s.files||[]).filter(f=>/^((events|warspotting|lost_warinua)\/points\/events|[^/]+\/points\/fires|[^/]+\/polygons\/(occupation|change_\w+))\.geojson(\.gz)?$/.test(f));
@@ -170,7 +172,32 @@ async function loadOcc(){
   EV=all.filter(f=>f.properties.source=="events"&&f.properties.categories);   /* skips old-format event files until the job rebuilds them */
   OCC=feats.length?{type:"FeatureCollection",features:feats}:null
  }catch(e){}
- drawOcc();drawEvPanel();drawSum(day)}
+ drawOcc();drawEvPanel();drawSum(day);if(panel=="po")loadPosts()}
+/* Posts panel: every Telegram channel's posts for the day, as copied (original language), loaded only when the panel is
+   open (about 140 small files). Filters: group, channel, search. Posts-only channels are not read by AI or mapped. */
+let PO=[],PG={},poFor=null,pq="",pOn={};
+async function loadPosts(){
+ const day=sel;if(poFor===day)return;poFor=day;PO=[];$("#pp").innerHTML='<p class="mut">Loading posts…</p>';
+ const files=Object.entries(META).filter(([s,m])=>m.status=="ok"&&SRCS[s]?.group).flatMap(([s,m])=>(m.files||[]).filter(f=>/\/posts\/posts\.geojson(\.gz)?$/.test(f)));
+ const parts=await Promise.all(files.map(f=>getJson(`data/${day}/${f}`).then(j=>j.features,()=>[])));
+ if(day!==sel)return;
+ PO=parts.flat().map(f=>f.properties).sort((a,b)=>a.posted_utc<b.posted_utc?1:-1);drawPoPanel()}
+function drawPoPanel(){
+ const cb=(k,v,l)=>`<label><input type="checkbox" data-pf="${esc(k+"|"+v)}" ${pOn[k+"|"+v]===false?"":"checked"}> ${l}</label> `,
+  cnt=(k,v)=>PO.filter(p=>p[k]==v).length,gs=[...new Set(PO.map(p=>p.group))].sort(),cs=[...new Set(PO.map(p=>p.source))].sort((a,b)=>(SRCS[a]?.name||a).localeCompare(SRCS[b]?.name||b));
+ $("#pp").innerHTML=`<div class="fg"><b>Groups</b>${gs.map(g=>cb("g",g,`${esc(PG[g]||g)} (${cnt("group",g)})`)).join("")||"none this day"}</div>`+
+  `<details class="dd fg"><summary class="btn">Channels: ${cs.length} ▾</summary><div class="ov ddl"><button class="btn" data-pall="1">Select all</button> <button class="btn" data-pall="0">Deselect all</button>`+
+  cs.map(s=>cb("c",s,`${esc(SRCS[s]?.name||s)} (${cnt("source",s)})`)).join("")+`</div></details>`+
+  `<input id="pq" class="fi" type="search" value="${esc(pq)}" placeholder="Search posts (AND, OR, NOT, &quot;phrases&quot;)">`+
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Telegram posts as copied, in their original language, unverified. Only the two ministries' posts are read by AI and placed on the map (Events).</p><div id="plist"></div>`;
+ listPo()}
+function listPo(){
+ const f=pq.trim()?qparse(pq):null,bad=pq.trim()&&!f,w=f&&f.terms,
+  items=PO.filter(p=>pOn["g|"+p.group]!==false&&pOn["c|"+p.source]!==false&&(!f||f((p.text+" "+p.source_name).toLowerCase()))),N=200;
+ $("#plist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${items.length} of ${PO.length} posts${items.length>N?`; showing the newest ${N} (narrow the filters to see others)`:""}</p>`+
+  (items.slice(0,N).map(p=>`<div class="row"><b>${esc(p.source_name)}</b> <span class="mut">· ${esc(PG[p.group]||p.group)} · ${esc(tm(p.posted_utc))}</span>`+
+   `<div style="white-space:pre-line;margin-top:4px">${hl(p.text||"",w)}</div>`+
+   `<div class="mut" style="margin-top:4px">${(p.media||[]).length?`Has ${esc(p.media.join(" and "))} · `:""}<a href="${esc(p.link)}" target="_blank" rel="noopener">Open on Telegram ↗</a></div></div>`).join("")||`<p class="mut">No posts for this day with these filters.</p>`)}
 /* Day summary: written by Gemini from that day's saved material, labelled as AI-written; errors are shown as they are */
 async function drawSum(day){
  const m=META.daily_summary,el=$("#sum");
@@ -224,7 +251,7 @@ function drawEvPanel(){
   `<details class="dd fg"><summary class="btn">Categories: <span id="ncat">${ncat()}</span> ▾</summary><div class="ov ddl"><button class="btn" data-all="1">Select all</button> <button class="btn" data-all="0">Deselect all</button>`+
   CCAT.map(c=>cb("cat",c,`${esc(c)} (${EV.filter(f=>f.properties.categories.includes(c)).length})`)).join("")+`</div></details>`+
   `<input id="eq" class="fi" type="search" value="${esc(eq)}" placeholder="Search events (AND, OR, NOT, &quot;phrases&quot;)">`+
-  `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account).<br><b>Fill</b>: blue Ukraine, red Russia; darker = more confident it happened (geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree).<br><b>Outline</b>: how sure the location is: solid = geolocated, dashed = town or area, dotted = oblast or region. Claims with no clear position (several regions, no place named) are listed but not mapped.<br>Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
+  `<p class="mut" style="margin:4px 0 8px">Newest first. Each event lists every source's claim separately (grouped only when they cite the same post; never merged into one account).<br><b>Fill</b>: blue Ukraine, red Russia; darker = more confident it happened (geolocated footage = high, video or photo in the post = medium, text only = low, one level higher when independent sources agree).<br><b>Outline</b>: how sure the location is: solid = geolocated, dashed = town or area. Claims with no clear position (only an oblast, several regions, no place named) are listed but not mapped.<br>Categories and places in ministry posts are read by Gemini (AI) and can be wrong.</p><div id="elist"></div>`;
  listEv()}
 function listEv(){
  const f=eq.trim()?qparse(eq):null,bad=eq.trim()&&!f,w=f&&f.terms,

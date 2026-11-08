@@ -67,6 +67,11 @@ POST_GROUPS = {   # the Posts tab's filter groups; each Posts source names one i
     "official_ru": "Official Russian",
     "unofficial_ua": "Unofficial Ukrainian (milbloggers etc.)",
     "unofficial_ru": "Unofficial Russian (milbloggers etc.)",
+    "units_ua": "Ukrainian military units",
+    "media_ru": "Russian media / news",
+    "media_ru_independent": "Russian independent / opposition media",
+    "moldova": "Moldova",
+    "unsorted": "Unsorted (please check)",
 }
 
 CLAIM_CATEGORIES = [   # every claim gets exactly one; edit freely (the Events panel's category filter uses this list)
@@ -291,6 +296,7 @@ SOURCES = {
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         # Usage limits: one request per day; input capped at this many characters; output capped.
         "catch_up_days": 3,   # also retries days that still have no summary
+        "post_sources": ["ua_mod", "ru_mod"],   # Telegram channels whose posts the summary reads (all map sources are read)
         "max_input_chars": 300000,
         "generation": {"maxOutputTokens": 4000},
         "instructions": (
@@ -302,6 +308,159 @@ SOURCES = {
             "Ukrainian or Russian into English. If the material is thin, say so briefly instead of padding."),
     },
 }
+
+# Posts-only Telegram channels (user, 2026-11-08: "i want them all added"), from source_documentation/sources_list.txt.
+# Copied daily for the Posts panel only: not read by Gemini, not in events or the daily summary (to use one there, add its
+# source ID, "tg_<channel>", to post_claims' "post_sources"). Saved gzip-compressed (lossless) to keep the site small.
+# Groups are the list's own best guesses; "unsorted" = the list's "please check" entries. Left out: volnanovosti (its
+# public page shows no posts), mod_russia and ministry_of_defense_ua (already above as ru_mod / ua_mod).
+# Row: (channel, group, name as shown on Telegram on 2026-11-08). To remove a channel, delete its row.
+TELEGRAM_POST_CHANNELS = [
+    ('wargonzo', 'unofficial_ru', 'WarGonzo'),
+    ('dva_majors', 'unofficial_ru', 'Два майора'),
+    ('motopatriot78', 'unofficial_ru', 'Анатолий Радов'),
+    ('rybar', 'unofficial_ru', 'Рыбарь'),
+    ('dnevnikdesantnika', 'unofficial_ru', 'Дневник Десантника🇷🇺'),
+    ('creamy_caprice', 'unofficial_ru', 'Сливочный каприз'),
+    ('severnnyi', 'unofficial_ru', 'Северный канал'),
+    ('zvizdecmanhustu', 'unofficial_ru', 'Zvиздец Мангусту'),
+    ('voin_dv', 'unofficial_ru', 'Воин DV'),
+    ('warriorofnorth', 'unofficial_ru', 'Северный Ветер'),
+    ('divgen', 'unofficial_ru', 'DIVGEN 🚩 Карта СВО'),
+    ('milinfolive', 'unofficial_ru', 'Военный Осведомитель'),
+    ('boris_rozhin', 'unofficial_ru', 'Colonelcassad'),
+    ('sashakots', 'unofficial_ru', 'Kotsnews'),
+    ('z_arhiv', 'unofficial_ru', 'Z комитет + карта СВО'),
+    ('epoddubny', 'unofficial_ru', 'Поддубный |Z|О|V| edition'),
+    ('rvvoenkor', 'unofficial_ru', 'Операция Z: Военкоры Русской Весны'),
+    ('voenkorkotenok', 'unofficial_ru', 'Военкор Котенок'),
+    ('bomber_fighter', 'unofficial_ru', 'Fighterbomber'),
+    ('arx_spn', 'unofficial_ru', 'АРХАНГЕЛ СПЕЦНАЗА'),
+    ('btr80', 'unofficial_ru', 'Работайте, братья!'),
+    ('lpr1_treugolnik', 'unofficial_ru', 'Lpr 1'),
+    ('vysokygovorit', 'unofficial_ru', 'Старше Эдды'),
+    ('z4lpr', 'unofficial_ru', '84-я МСД🇷🇺'),
+    ('specnazahmat', 'unofficial_ru', 'Батальон "ШРАМА" 204 полк СпН "АХМАТ"'),
+    ('olegtsarov', 'unofficial_ru', 'Олег Царёв'),
+    ('operationall_space', 'unofficial_ru', 'Оперативный простор'),
+    ('supernova_plus', 'unofficial_ua', 'Supernova+'),
+    ('serhii_flash', 'unofficial_ua', 'Сергій FLASH | Про технології'),
+    ('robert_magyar', 'unofficial_ua', 'МАДЯР🇺🇦'),
+    ('osintpen', 'unofficial_ua', 'Дом Осинтеров 🏠'),
+    ('butusovplus', 'unofficial_ua', 'БУТУСОВ ПЛЮС'),
+    ('exilenova_plus', 'unofficial_ua', 'Exilenova+'),
+    ('crimeanwind', 'unofficial_ua', 'Крымский ветер'),
+    ('wararchive_ua', 'unofficial_ua', 'WarArchive'),
+    ('yokaiua', 'unofficial_ua', 'Yokai'),
+    ('kharkivnapriamok', 'unofficial_ua', 'Харківський напрямок'),
+    ('grvzapad', 'official_ru', 'Группировка войск «Запад»'),
+    ('tass_agency', 'official_ru', 'ТАСС'),
+    ('medvedev_telegram', 'official_ru', 'Дмитрий Медведев'),
+    ('zarubinreporter', 'official_ru', 'ЗАРУБИН'),
+    ('mod_russia_en', 'official_ru', 'MoD Russia'),
+    ('rian_crimea', 'official_ru', 'РИА Новости Крым'),
+    ('rkadyrov_95', 'official_ru', 'Kadyrov_95'),
+    ('kompartya', 'official_ru', 'КПРФ'),
+    ('astrapress', 'media_ru_independent', 'ASTRA'),
+    ('bbcrussian', 'media_ru_independent', 'BBC News | Русская служба'),
+    ('istories_media', 'media_ru_independent', 'Важные истории'),
+    ('sotaproject', 'media_ru_independent', 'SOTA'),
+    ('mash', 'media_ru', 'Mash'),
+    ('ostorozhno_novosti', 'media_ru', 'Осторожно, новости'),
+    ('bureau_1440', 'media_ru', 'БЮРО 1440'),
+    ('rucriminalinfo_2', 'media_ru', 'ВЧК-ОГПУ'),
+    ('generalstaffzsu', 'official_ua', 'Генеральний штаб ЗСУ'),
+    ('v_zelenskiy_official', 'official_ua', 'Zelenskiy / Official'),
+    ('kpszsu', 'official_ua', 'Повітряні Сили ЗС України / Air Force of the Armed Forces of Ukraine'),
+    ('dsns_telegram', 'official_ua', 'ДСНС України'),
+    ('ukrenergo', 'official_ua', 'Укренерго'),
+    ('sbukr', 'official_ua', 'Служба безпеки України'),
+    ('diukraine', 'official_ua', 'Головне управління розвідки МО України'),
+    ('dtek_ua', 'official_ua', 'ДТЕК - офіційний канал'),
+    ('mvs_ukraine', 'official_ua', 'МВС України'),
+    ('dpsukr', 'official_ua', 'ДПСУ | Держприкордонслужба'),
+    ('dmytro_lubinetzs', 'official_ua', 'Омбудсман Лубінець Дмитро'),
+    ('joint_forces_task_force', 'official_ua', "Угруповання об'єднаних сил / Joint Forces Task Force"),
+    ('koretskyi_official', 'official_ua', 'Сергій Корецький | Премʼєр-міністр 🇺🇦'),
+    ('vitaliy_klitschko', 'official_ua', 'Віталій Кличко'),
+    ('synegubov', 'official_ua', 'Олег Синєгубов, начальник Харківської ОДА'),
+    ('dnipropetrovskaoda', 'official_ua', 'Олександр Ганжа / Дніпропетровська ОДА (ОВА)'),
+    ('ihor_terekhov', 'official_ua', 'Ігор Терехов'),
+    ('kyivoda', 'official_ua', '🇺🇦 Київська обласна військова адміністрація'),
+    ('zoda_gov_ua', 'official_ua', 'Михайло Семікін - Запорізька ОВА'),
+    ('odeskaoda', 'official_ua', '🇺🇦Олег Кіпер/Одеська ОДА (ОВА)'),
+    ('poltavskaova', 'official_ua', '🇺🇦 Віталій Дяківнич | Полтавська ОВА'),
+    ('tkachenkotymur', 'official_ua', 'Тимур Ткаченко 🇺🇦'),
+    ('oleksandrkoval_rv', 'official_ua', 'Олександр Коваль / Рівненська ОДА'),
+    ('odesamva', 'official_ua', '🇺🇦 Сергій Лисак/Одеська МВА'),
+    ('mykola_lukashuk', 'official_ua', '🇺🇦Микола Лукашук – голова ДОР'),
+    ('ivan_fedorov_zp', 'official_ua', '🇺🇦 Іван Федоров | Рада Оборони Запорізької обл.'),
+    ('chernigivskaoda', 'official_ua', "🇺🇦 В'ячеслав Чаус/ Чернігівська ОДА (ОВА)"),
+    ('dniproofficial', 'official_ua', 'Dnipro Osint ⟨ Гарбуз ⟩'),
+    ('vilkul', 'official_ua', 'Олександр Вілкул'),
+    ('press_kobl', 'official_ua', 'Київська обласна прокуратура'),
+    ('e_v_kovalchuk', 'official_ua', 'Егор Ковальчук'),
+    ('cherkaskaoda', 'official_ua', '🇺🇦 Ігор Табурець | Начальник Черкаської ОВА'),
+    ('mykolaiv_ova', 'official_ua', 'Георгій Решетілов | Миколаївська ОВА'),
+    ('odesacityofficial', 'official_ua', 'Одеса. Офіційно'),
+    ('kyivcityofficial', 'official_ua', 'КМДА – офіційний канал'),
+    ('kyiv_passtrans', 'official_ua', 'єКиївпастранс | Громадський транспорт Київ'),
+    ('andriysadovyi', 'official_ua', 'Андрій Садовий'),
+    ('kozytskyy_maksym_official', 'official_ua', '🇺🇦 Максим Козицький/Львівська ОВА (ОДА)'),
+    ('kirovogradskaoda', 'official_ua', '🇺🇦 Андрій Райкович/ Кіровоградська ОДА (ОВА)'),
+    ('khersonskaoda', 'official_ua', '🇺🇦Херcонська ОДА (ОВА)'),
+    ('olexandrprokudin', 'official_ua', 'Прокудін Олександр - Офіційна сторінка'),
+    ('kramatorsk_rada', 'official_ua', 'Краматорська міська рада'),
+    ('vadymfilashkin', 'official_ua', 'Вадим Філашкін / Донецька ОДА (ОВА)'),
+    ('sinkovka_kupyansk', 'official_ua', 'ЛУГАНСКИЙ СВЯЗНОЙ'),
+    ('yuri_slusar', 'official_ua', 'Юрий Слюсарь'),
+    ('hryhorov_oleg', 'official_ua', 'Олег Григоров | Сумська ОВА'),
+    ('corps7dshv', 'units_ua', '7 корпус ДШВ'),
+    ('stribat33oshp', 'units_ua', '33 ОШП СБ'),
+    ('oshp_225', 'units_ua', '△ 225 ОШП △'),
+    ('tro119ua', 'units_ua', '119 ОБр ТрО | Свій серед своїх'),
+    ('ab3army', 'units_ua', 'Третій армійський корпус'),
+    ('polk_210', 'units_ua', '210 окремий штурмовий полк'),
+    ('hart_brigade', 'units_ua', 'Бригада «Гарт»'),
+    ('centr_omega_ngu', 'units_ua', 'ЦСП «ОМЕГА»'),
+    ('volyn100obrtro', 'units_ua', '100 окрема механізована бригада Сухопутних військ ЗСУ'),
+    ('rubizh3018', 'units_ua', 'Бригада "РУБІЖ"'),
+    ('kuaairbome8', 'units_ua', '8 корпус ДШВ ЗС України'),
+    ('raid_413', 'units_ua', 'РЕЙД | 413 полк СБС'),
+    ('skala425', 'units_ua', 'СКЕЛЯ 425'),
+    ('ombr43', 'units_ua', '43 окрема механізована бригада'),
+    ('ronins_65', 'units_ua', 'РОНІНИ'),
+    ('svarog_usf', 'units_ua', 'SVAROG | 424 батальйон СБС'),
+    ('khartiia', 'units_ua', 'КОРПУС ХАРТІЯ'),
+    ('shadow_strike_27', 'units_ua', '27 SHADOW STRIKE'),
+    ('uvo58', 'units_ua', '58 АРМИЯ'),
+    ('bv25org', 'units_ua', 'БРАТСТВО ВОИНОВ'),
+    ('maeiexplica', 'moldova', 'MAExplică'),
+    ('mdnationalarmy', 'moldova', 'army.md'),
+    ('politia_republicii_moldova', 'moldova', 'Poliția Republicii Moldova'),
+    ('absolutely_reliable', 'unsorted', 'Абсолютно надійне джерело'),
+    ('t3mny', 'unsorted', 'Тѣмный'),
+    ('tavria_train', 'unsorted', 'Гранд Сервис Экспресс'),
+    ('war_home', 'unsorted', 'Полковник ГШ'),
+    ('vorobiev_live', 'unsorted', 'Воробьёв LIVE'),
+    ('eradarrua', 'unsorted', '🔊⚠️єРадар | Повітряна тривога | Ракетна небезпека'),
+    ('skzd_official', 'unsorted', 'Телеграмма СКЖД'),
+    ('ampu_uspa', 'unsorted', '🇺🇦АМПУ/USPA🇺🇦 (АДМІНІСТРАЦІЯ МОРСЬКИХ ПОРТІВ УКРАЇНИ)'),
+    ('rwp_rwp', 'unsorted', 'ГАЗЕТА "РАБОЧАЯ ДЕМОКРАТИЯ" | РРП | РЕВОЛЮЦИОННАЯ РАБОЧАЯ ПАРТИЯ'),
+    ('tovarishcommunist', 'unsorted', 'Баир Цыренов 🚩'),
+    ('jacksons_dairy', 'unsorted', '«Щоденник Джексона»!'),
+    ('zapravdu_1429', 'unsorted', '1429 ZА ПРАВДУ'),
+    ('soniah_hub', 'unsorted', 'Соняшник🦅'),
+    ('pul69', 'unsorted', 'Тверская область. Официально'),
+    ('newskievru', 'unsorted', 'Лента новостей Киева | Z'),
+    ('vbs_olkhon', 'unsorted', 'ВБС Ольхон'),
+    ('rug_international', 'unsorted', '23 ШТУРМОВИЙ ПОЛК Р.У.Г | 2 КОРПУС НГУ «ХАРТІЯ»'),
+    ('craftoriz', 'unsorted', 'CRAFTORIZ'),
+    ('contraomnes4', 'unsorted', 'Попри Все ⚔️SOF⚔️'),
+]
+SOURCES.update({f"tg_{ch}": {"enabled": True, "kind": "telegram_posts", "name": name, "url": f"https://t.me/s/{ch}",
+                             "channel": ch, "group": group, "lookback_days": 2, "max_pages": 40,
+                             "filename": "posts/posts.geojson.gz"} for ch, group, name in TELEGRAM_POST_CHANNELS})
 
 # =====================================================================================================
 # CODE (you should not need to touch this)
@@ -804,7 +963,7 @@ def save_points_merged(sid, cfg, args, data, now, found, replace_days, endpoint)
     full and replace what was saved; any other day is merged into what is already saved, matched by ID, so an
     item fetched twice or already saved is never duplicated. Items without coordinates are left off the map;
     their IDs are listed in meta.json."""
-    filename = KIND_FILENAMES[cfg["kind"]]
+    filename = cfg.get("filename") or KIND_FILENAMES[cfg["kind"]]
     for d in sorted(set(found) | set(replace_days)):
         old_meta = read_json(data / d / "meta.json", {"sources": {}})["sources"].get(sid, {})
         if d in replace_days:
@@ -1328,6 +1487,8 @@ def summarise_day(sid, cfg, args, d, now, data):
     lines = []
     for src, m in meta.items():
         name = SOURCES.get(src, {}).get("name", src)
+        if "/posts/" in str(m.get("files")) and src not in cfg["post_sources"]:   # posts-only channels stay out of the summary
+            continue
         for f in [f for f in m.get("files", []) if re.search(r"/(posts|points)/[^/]+\.geojson(\.gz)?$", f)] if m.get("status") == "ok" else []:
             for x in read_json(data / d / f, {"features": []})["features"]:
                 p = x["properties"]
