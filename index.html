@@ -207,7 +207,7 @@ function drawOcc(){
    Map symbol: fill = side colour, darker the surer it is that the event happened (occurrence confidence); outline = how
    sure the location is (solid geolocated, dashed town or area, dotted oblast or region). Events without a clear position
    are listed but not mapped. "Show on map" flies there and keeps the panel open. */
-const LOCS={geolocated:"Geolocated",place:"Town or area",region:"Oblast or region",none:"Not mapped"},CONF=["high","medium","low"],
+const LOCS={geolocated:"Geolocated",place:"Town or area",none:"Not mapped"},CONF=["high","medium","low"],
  shade=(c,k)=>{const f={medium:.45,low:.75}[k]||0;return /^#[0-9a-f]{6}$/i.test(c)?"#"+[1,3,5].map(i=>Math.round(parseInt(c.substr(i,2),16)*(1-f)+255*f).toString(16).padStart(2,"0")).join(""):c},   /* mixed with white: medium 45%, low 75% */
  DASH={geolocated:null,place:"7 5",region:"1 6"},BORD={geolocated:"solid",place:"dashed",region:"dotted",none:"none"},
  tm=t=>t.slice(0,16).replace("T"," ")+" UTC",
@@ -233,7 +233,7 @@ function listEv(){
  drawEv(items);
  $("#elist").innerHTML=(bad?`<p class="mut">Couldn't read that search (check the brackets), so it is not applied.</p>`:"")+`<p class="mut">${items.length} of ${EV.length} events</p>`+
   (items.map(({p,i})=>`<div class="row"><span class="dot" style="background:${esc(shade(p.color,p.confidence))};border:2px ${BORD[p.location]} var(--fg)"></span><b>${hl(p.category,w)}</b> <span class="mut">· ${esc(p.confidence)} occurrence confidence</span>`+
-   `<div class="mut">${esc(p.time_utc?tm(p.time_utc):p.date)} · ${esc(p.side)} · ${esc(LOCS[p.location])}${p.place?": "+esc(p.place):""}</div>`+
+   `<div class="mut">${esc(p.time_utc?tm(p.time_utc):p.date)} · ${esc(p.side)} · ${esc(LOCS[p.location]||p.location)}${p.place?": "+esc(p.place):""}</div>`+
    `<div style="margin-top:4px">${hl((p.claim||"").slice(0,300),w)}</div>`+
    `<div class="mut">${p.claims.length>1?`<b>${p.claims.length} sources:</b> `:"Source: "}${esc([...new Set(p.claims.map(c=>c.source_name))].join(", "))}</div>`+
    `<button class="btn" data-go="${i}" style="margin-top:6px">${EL[i]?"Show on map":"Details"}</button></div>`).join("")||`<p class="mut">No events for this day with these filters.</p>`)}
@@ -285,18 +285,27 @@ function qparse(q){
 const hl=(t,ws)=>{if(!ws||!ws.length)return esc(t);
  const re=new RegExp("("+ws.slice().sort((a,b)=>b.length-a.length).map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|")+")","giu");
  return t.split(re).map((x,i)=>i%2?`<mark>${esc(x)}</mark>`:esc(x)).join("")};
-/* Event popup: confidence and location, the event's media, then every source's claim separately, earliest first */
-const evPopE=p=>`<div style="overflow-wrap:anywhere"><b>${esc(p.category)}</b><div class="mut">Occurrence: ${esc(p.confidence)} confidence (${esc(p.confidence_reason)})<br>Location: ${esc(LOCS[p.location])} (${esc(p.precision)})${p.place?`, ${esc(p.place)}`:""}</div>`+
- `<div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${p.claims.length>1?"s, listed separately":""}</div>`+medBtns(p)+
- p.claims.map(c=>`<hr><div class="mut"><b>${esc(c.source_name)}</b> (${esc(c.kind)}) · ${esc(c.side)} · ${esc(c.time_utc?tm(c.time_utc):c.date)}</div><b>${esc(c.category)}</b>`+
-  (c.source_category?` <span class="mut">(source's own category: ${esc(c.source_category)})</span>`:"")+`<p style="white-space:pre-line;margin:4px 0">${esc(c.claim||"")}</p>`+
-  `<div class="mut">Evidence: ${esc(c.evidence)} · Location: ${esc(c.precision)}${c.place?` (${esc(c.place)})`:""}</div>`+
-  ((c.orbat||[]).length?`<b>ORBAT:</b> ${c.orbat.map(esc).join("; ")}<br>`:"")+
-  ((c.geolocation||[]).length?`<b>Geolocation:</b><br>${c.geolocation.map(lk).join("<br>")}<br>`:"")+
-  ((c.sources||[]).length?`<b>Links:</b><br>${c.sources.map(u=>{const t=(c.source_times||[]).find(x=>x.url==u);return lk(u)+(t&&t.time_utc?` <span class="mut">${esc(tm(t.time_utc))}</span>`:"")+(u==c.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")}<br>`:"")+
-  (c.post_text?`<details><summary>Original post text</summary><p style="white-space:pre-line">${esc(c.post_text)}</p></details>`:"")+
-  `<a href="${esc(c.link)}" target="_blank" rel="noopener">Open original</a>`).join("")+
- (p.possible_matches.length?`<hr><div class="mut">Possibly the same as ${p.possible_matches.length} other item(s) (one post behind several items; not merged).</div>`:"")+`</div>`;
+/* Event popup (pared down, v1.55): title (category · place), date, confidence and location; then each source's description,
+   the media buttons and links to the original posts. Several sources stay separate blocks, never merged. GeoConfirmed links
+   go straight to the posts it cites (earliest first); its own entry and everything else sit under "More details". */
+const PLAT=u=>/\/\/(www\.)?(x|twitter)\.com\//.test(u)?"X":/\/\/t\.me\//.test(u)?"Telegram":(u.split("/")[2]||"link"),
+ origs=c=>c.source=="geoconfirmed"&&(c.sources||[]).length?[...c.sources].sort((a,b)=>(b==c.earliest_source_url)-(a==c.earliest_source_url)):[c.link],
+ evPopE=p=>{const one=p.claims.length==1,
+  desc=c=>(one?"":`<div class="mut"><b>${esc(c.source_name)}</b></div>`)+`<p style="white-space:pre-line;margin:4px 0">${esc(c.claim||"")}${c.post_text?` <span class="mut">(AI summary)</span>`:""}</p>`+
+   (c.post_text?`<details><summary class="mut">Show original post text</summary><p style="white-space:pre-line">${esc(c.post_text)}</p></details>`:""),
+  links=c=>`<div style="margin-top:4px">${origs(c).map(u=>`<a href="${esc(u)}" target="_blank" rel="noopener">Original post · ${esc(PLAT(u))} ↗</a>`).join("<br>")}</div>`;
+  return `<div style="overflow-wrap:anywhere"><b>${esc(p.category)}${p.place?` · ${esc(p.place.split(" (")[0])}`:""}</b> <span class="mut">${esc(p.time_utc?tm(p.time_utc):p.date)}</span>`+
+  `<div class="mut">Confidence: ${esc(p.confidence)} · Location: ${esc(LOCS[p.location]||p.location)}${p.place?` (${esc(p.place)})`:""}</div><hr>`+
+  (one?desc(p.claims[0])+medBtns(p)+links(p.claims[0]):p.claims.map(c=>desc(c)+links(c)).join("<hr>")+medBtns(p))+
+  `<details style="margin-top:6px"><summary class="mut">More details</summary><div class="mut">Event ${esc(p.id)} · ${p.claims.length} source${one?"":"s, listed separately"}<br>Confidence reason: ${esc(p.confidence_reason)} · Location precision: ${esc(p.precision)}</div>`+
+  p.claims.map(c=>`<div style="margin-top:6px"><b>${esc(c.source_name)}</b> <span class="mut">(${esc(c.kind)}) · ${esc(c.side)} · ${esc(c.time_utc?tm(c.time_utc):c.date)}</span><br>`+
+   `Category: ${esc(c.category)}${c.source_category?` <span class="mut">(source's own category: ${esc(c.source_category)})</span>`:""}<br>`+
+   `<span class="mut">Evidence: ${esc(c.evidence)} · Location: ${esc(c.precision)}${c.place?` (${esc(c.place)})`:""}</span><br>`+
+   ((c.orbat||[]).length?`<b>ORBAT:</b> ${c.orbat.map(esc).join("; ")}<br>`:"")+
+   ((c.geolocation||[]).length?`<b>Geolocation:</b><br>${c.geolocation.map(lk).join("<br>")}<br>`:"")+
+   ((c.sources||[]).length?`<b>Links:</b><br>${c.sources.map(u=>{const t=(c.source_times||[]).find(x=>x.url==u);return lk(u)+(t&&t.time_utc?` <span class="mut">${esc(tm(t.time_utc))}</span>`:"")+(u==c.earliest_source_url?" <b>(earliest)</b>":"")}).join("<br>")}<br>`:"")+
+   (c.source=="geoconfirmed"?`<b>GeoConfirmed entry:</b> ${lk(c.link)}`:"")+`</div>`).join("")+
+  (p.possible_matches.length?`<div class="mut" style="margin-top:6px">Possibly the same as ${p.possible_matches.length} other item(s) (one post behind several items; not merged).</div>`:"")+`</details></div>`};
 /* The event's media from all its sources, copies that play here first (YouTube, X, then Telegram). Telegram videos that
    Telegram refuses to play outside its app ("too big") only get a link. Nothing loads until a button is clicked. */
 const PLN={yt:"YouTube",x:"X",tg:"Telegram"},

@@ -1081,7 +1081,7 @@ def media_of(c):
 
 def run_event_builder(sid, cfg, args, day, now, data):
     """Rebuild all events from every claim: GeoConfirmed items (category by rules, geolocated) and claims parsed from posts
-    (located by OCHA place names, else the oblast, else Gemini's estimate). Claims citing the same specific post are
+    (located by OCHA place names, else Gemini's estimate for one named place; claims naming only an oblast are not mapped). Claims citing the same specific post are
     grouped (strongest links first, never two claims of one source). Confidence starts from the evidence and rises one
     level when several independent sources report the event. Each event is filed under the date it happened."""
     places = read_json(REF / "places.json.gz", [])
@@ -1091,7 +1091,6 @@ def run_event_builder(sid, cfg, args, day, now, data):
         by_name[norm(q[0])].append(q)
         by_name[norm(q[1])].append(q)
         by_obl[norm(q[4])].append(q)
-    obl_mid = {k: (sum(x[5] for x in v) / len(v), sum(x[6] for x in v) / len(v)) for k, v in by_obl.items()}
 
     def obl(t):   # English oblast name (Sumy, Sumy Oblast, Crimea) -> OCHA oblast key (sumska), or None
         t = norm(t).replace("oblast", "").replace("region", "")
@@ -1100,8 +1099,8 @@ def run_event_builder(sid, cfg, args, day, now, data):
 
     def locate(c):
         """Where a claim can honestly be put on the map, as (coordinates, precision, place, location level):
-        a named settlement or other specific place ("place"), else one named oblast/region ("region"), else not mapped
-        ("none": several regions, a whole country, or no place named; such claims stay in the list only)."""
+        a named settlement or other specific place ("place"), else not mapped ("none": only an oblast/region, several
+        regions, a whole country, or no place named; such claims stay in the list only)."""
         pls = [x for x in c.get("places") or [] if isinstance(x, dict)]
         ai = c.get("approx_lat") is not None and c.get("approx_lon") is not None
         for pl in pls:
@@ -1118,13 +1117,8 @@ def run_event_builder(sid, cfg, args, day, now, data):
                     and region_key(pl["name_en"]) not in regions and norm(pl["name_en"]) != norm(pl.get("country"))]
         if ai and len(specific) == 1 and len(regions) <= 1:   # one named place not in OCHA's list (e.g. in Russia, or a facility)
             return [c["approx_lon"], c["approx_lat"]], "place (AI estimate)", str(specific[0]["name_en"]), "place"
-        if len(regions) == 1 and not specific:
-            r = next(iter(regions))
-            name = next(str(pl["oblast_or_region"]) for pl in pls if pl.get("oblast_or_region"))
-            if r in obl_mid:
-                return [obl_mid[r][1], obl_mid[r][0]], "oblast (centre)", name, "region"
-            if ai:
-                return [c["approx_lon"], c["approx_lat"]], "region (AI estimate)", name, "region"
+        if len(regions) == 1 and not specific:   # only an oblast/region named: listed, not mapped (user, 2026-11-08)
+            return None, "not mapped: oblast/region only", next(str(pl["oblast_or_region"]) for pl in pls if pl.get("oblast_or_region")), "none"
         return None, "not mapped: " + ("several regions" if len(regions) > 1 or len(specific) > 1 else "no specific place named"), "", "none"
 
     lvl, rules = cfg["confidence_from_evidence"], [(re.compile(r), c) for r, c in cfg["geoconfirmed_categories"]]
@@ -1202,7 +1196,7 @@ def run_event_builder(sid, cfg, args, day, now, data):
             "date": min(claims[c]["date"] for c in members), "time_utc": next((claims[c]["time_utc"] for c in members if claims[c]["time_utc"]), None),
             "category": lead["category"], "categories": sorted({claims[c]["category"] for c in members}), "claim": lead["claim"],
             "side": lead["side"], "color": lead["color"], "confidence": cfg["levels"][level], "confidence_reason": reason,
-            "location": lead["loc"],   # location confidence: geolocated / place (town or area) / region (oblast or larger) / none (not mapped)
+            "location": lead["loc"],   # location confidence: geolocated / place (town or area) / none (not mapped; oblast-only claims too, since 2026-11-08)
             "precision": lead["precision"], "place": lead["place"], "claim_sources": sorted(srcs), "claims": out,
             "possible_matches": sorted({o for c in members for o in possible.get(c, ())} - set(members)),
             "media": sorted(media.values(), key=lambda m: (m["too_big"] is True, {"yt": 0, "x": 1, "tg": 2}[m["platform"]]))}})
